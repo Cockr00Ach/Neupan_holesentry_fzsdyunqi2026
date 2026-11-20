@@ -44,7 +44,6 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
-from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Empty, String
 from visualization_msgs.msg import MarkerArray
 
@@ -93,7 +92,7 @@ STORE = Store()
 # ROS node
 # --------------------------------------------------------------------------- #
 class WebBridge(Node):
-    def __init__(self, cloud_max=350, point_rate=10.0):
+    def __init__(self, cloud_max=300, point_rate=12.0):
         super().__init__('neupan_web')
         self.cloud_max = cloud_max
         self._last_cloud_time = 0.0
@@ -131,17 +130,10 @@ class WebBridge(Node):
         if now - self._last_cloud_time < self._min_cloud_period:
             return
         self._last_cloud_time = now
-        try:
-            raw = pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
-            if isinstance(raw, np.ndarray) and raw.dtype.names:
-                arr = np.stack([raw['x'], raw['y'], raw['z']], axis=1)
-            else:
-                arr = np.asarray(raw, dtype=np.float64).reshape(-1, 3)
-            arr = arr[np.isfinite(arr).all(axis=1)]
-            pts = arr.tolist()
-        except Exception as exc:  # pragma: no cover
-            self.get_logger().warn(f'cloud decode failed: {exc}', throttle_duration_sec=5.0)
+        arr = decode_xyz(msg)
+        if arr is None:
             return
+        pts = arr.tolist()
         if not pts:
             return
         if len(pts) > self.cloud_max:
@@ -225,7 +217,7 @@ def api_stream():
             if data['seq'] != last:
                 last = data['seq']
                 yield 'data: ' + json.dumps(data, separators=(',', ':')) + '\n\n'
-            time.sleep(0.05)
+            time.sleep(0.04)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache',
@@ -263,12 +255,35 @@ def api_health():
                     'seq': data['seq'], 'ros': NODE is not None})
 
 
+def decode_xyz(msg: PointCloud2):
+    """Fast PointCloud2 -> (N, 3) float32 array of the x/y/z fields (or None)."""
+    n = int(msg.width) * int(msg.height)
+    if n <= 0 or msg.point_step <= 0 or not msg.data:
+        return None
+    fields = {f.name: f for f in msg.fields}
+    if not {'x', 'y', 'z'} <= fields.keys():
+        return None
+    raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+    if raw.size < n * msg.point_step:
+        n = raw.size // msg.point_step
+        if n <= 0:
+            return None
+        raw = raw[:n * msg.point_step]
+    rows = raw.reshape(n, msg.point_step)
+    xyz = np.empty((n, 3), dtype=np.float32)
+    for i, name in enumerate(('x', 'y', 'z')):
+        off = fields[name].offset
+        xyz[:, i] = np.frombuffer(rows[:, off:off + 4].tobytes(), dtype=np.float32)
+    finite = np.isfinite(xyz).all(axis=1)
+    return xyz[finite]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8088)
-    parser.add_argument('--cloud-max', type=int, default=350,
+    parser.add_argument('--cloud-max', type=int, default=300,
                         help='max obstacle points sent to the browser')
     parser.add_argument('--point-rate', type=float, default=10.0,
                         help='max obstacle cloud update rate [Hz]')

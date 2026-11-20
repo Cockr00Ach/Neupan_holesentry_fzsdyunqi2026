@@ -14,6 +14,10 @@ neupan_bridge:
 
     control_rate: 50.0
     publish_visualization: true
+    # 发布频率：状态给网页/脚本，轨迹和标记给 RViz/网页，点云给 NeuPAN
+    status_rate: 20.0
+    viz_rate: 15.0
+    cloud_rate: 12.0
     publish_tf: true
 
     # topics (empty -> defaults derived from robot_ns)

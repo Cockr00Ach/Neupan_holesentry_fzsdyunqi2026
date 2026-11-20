@@ -257,21 +257,35 @@
     mctx.restore();
   }
 
-  function drawPoints(points, color, radius, heightColor) {
-    if (!points || !points.length) return;
-    mctx.fillStyle = color;
-    if (!heightColor) {
-      for (const p of points) {
-        const [x, y] = w2s(p[0], p[1]);
-        mctx.beginPath(); mctx.arc(x, y, radius, 0, 6.2832); mctx.fill();
-      }
-      return;
-    }
+  // Points are drawn as one path per colour bucket: a single fill() for hundreds of
+  // markers instead of one fill() per marker (the old version was the main draw cost).
+  function bucketPath(points, radius) {
+    mctx.beginPath();
     for (const p of points) {
       const [x, y] = w2s(p[0], p[1]);
+      mctx.moveTo(x + radius, y);
+      mctx.arc(x, y, radius, 0, 6.2832);
+    }
+    mctx.fill();
+  }
+
+  function drawPoints(points, color, radius, heightColor) {
+    if (!points || !points.length) return;
+    if (!heightColor) {
+      mctx.fillStyle = color;
+      bucketPath(points, radius);
+      return;
+    }
+    const buckets = [[], [], [], [], []];
+    for (const p of points) {
       const t = Math.max(0, Math.min(1, (p[2] || 0) / 1.2));
-      mctx.fillStyle = `hsl(${32 - 20 * t}, ${85}%, ${58 + 12 * t}%)`;
-      mctx.beginPath(); mctx.arc(x, y, radius, 0, 6.2832); mctx.fill();
+      buckets[Math.min(4, Math.floor(t * 5))].push(p);
+    }
+    for (let i = 0; i < buckets.length; i++) {
+      if (!buckets[i].length) continue;
+      const t = i / 4;
+      mctx.fillStyle = `hsl(${32 - 20 * t}, 85%, ${58 + 12 * t}%)`;
+      bucketPath(buckets[i], radius);
     }
   }
 
@@ -322,6 +336,15 @@
     mctx.restore();
   }
 
+  let dirty = false;
+  let rafId = 0;
+  function scheduleDraw() {
+    dirty = true;
+    if (rafId) return;
+    // coalesce bursts of SSE frames into one paint per display refresh
+    rafId = requestAnimationFrame(() => { rafId = 0; if (dirty) { dirty = false; draw(); } });
+  }
+
   function draw() {
     if (!state.data) { mctx.fillStyle = COLORS.bg; mctx.fillRect(0, 0, mapSize.w, mapSize.h); }
     drawGrid();
@@ -366,11 +389,19 @@
 
     // obstacle points coloured by height
     if (state.layers.cloud && d.cloud) {
+      const buckets = [[], [], [], [], []];
       for (const p of d.cloud) {
         const t = Math.max(0, Math.min(1, (p[2] || 0) / 1.2));
-        const q = proj(p[0] - state.view.cx, p[1] - state.view.cy, p[2] || 0);
+        buckets[Math.min(4, Math.floor(t * 5))].push(p);
+      }
+      for (let i = 0; i < buckets.length; i++) {
+        if (!buckets[i].length) continue;
+        const t = i / 4;
         ictx.fillStyle = `hsla(${32 - 20 * t}, 85%, ${55 + 15 * t}%, .9)`;
-        ictx.fillRect(q[0], q[1], 1.6, 1.6);
+        for (const p of buckets[i]) {
+          const q = proj(p[0] - state.view.cx, p[1] - state.view.cy, p[2] || 0);
+          ictx.fillRect(q[0], q[1], 1.6, 1.6);
+        }
       }
     }
 
@@ -505,7 +536,7 @@
     }
     setChips(st);
     logEvent(st.event);
-    draw();
+    scheduleDraw();
     state.frames++;
     const now = performance.now();
     if (now - state.fpsT > 1000) {

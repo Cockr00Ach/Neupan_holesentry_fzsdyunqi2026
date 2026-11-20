@@ -7,6 +7,8 @@
 #   ./run_sim.sh --gui                # also open the Gazebo GUI (viewer only)
 #   ./run_sim.sh --wait               # do not follow planner.yaml, wait for /goal_pose
 #   ./run_sim.sh --web                # also serve the web view on 127.0.0.1:8088
+#   ./run_sim.sh --nav-only           # spawn the robots without the 1080p camera
+#                                     (real-time factor ~1.0 instead of ~0.7)
 #
 # Notes
 #  * Gazebo runs in server-only mode (-s): with the GUI attached the Sensors system
@@ -28,6 +30,7 @@ START_REFEREE=0
 WAIT_FOR_GOAL=0
 START_WEB=0
 WEB_PORT=8088
+NAV_ONLY=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,6 +42,7 @@ while [ $# -gt 0 ]; do
         --referee) START_REFEREE=1; shift ;;
         --wait) WAIT_FOR_GOAL=1; shift ;;
         --web) START_WEB=1; shift ;;
+        --nav-only) NAV_ONLY=1; shift ;;
         --web-port) WEB_PORT=$2; shift 2 ;;
         --no-bridge) START_BRIDGE=0; shift ;;
         -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
@@ -108,6 +112,10 @@ fi
 
 # ---------------------------------------------------------------- robots
 echo "[2/4] spawning robots"
+if [ "$NAV_ONLY" = 1 ]; then
+    export GAZEBO_DISABLE_CAMERA=1
+    echo "      nav-only: robots spawned without the 1080p camera"
+fi
 nohup ros2 launch rmu_gazebo_simulator spawn_robots.launch.py \
     > "$LOG_DIR/spawn.log" 2>&1 &
 for _ in $(seq 1 30); do

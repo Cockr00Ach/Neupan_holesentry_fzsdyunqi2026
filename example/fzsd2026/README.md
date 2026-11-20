@@ -156,6 +156,30 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | POST | `/api/stop` | 发布 `/neupan_cancel`：停车 + 清空目标 |
 | GET | `/api/health` | `{"ok":true,"mode":"driving","ros":true,...}` |
 
+### 帧率：瓶颈在哪（实测数据）
+
+| 环节 | 优化前 | 现在 | 说明 |
+| --- | --- | --- | --- |
+| Gazebo 实时率 RTF | 0.68 | **1.00**（`--nav-only`） | 1080p 相机渲染 + 图像桥接约占 1.5 个核，是整条链路的根瓶颈 |
+| 雷达 `/livox/lidar` | 7 Hz | **10 Hz** | 随 RTF 一起恢复，NeuPAN 输入帧率上限由它决定 |
+| `/neupan_status` | 5 Hz | **20 Hz** | 桥接节点发布，网页的状态/位姿来自它 |
+| `/neupan_obstacles` | 50 Hz | **12 Hz**（`cloud_rate`） | 500 点、约 5 KB/帧，按需再降 |
+| 轨迹 / DUNE/NRMP 标记 | 50 Hz | **15 Hz**（`viz_rate`） | RViz 与网页都够用 |
+| 网页 SSE 推流 | 16 Hz | **26 Hz** | 40 ms 轮询 + 只在数据变化时发 |
+| 单帧 JSON | 8.7 KB | **5.5 KB** | 点云 300 点 + 3 位小数 |
+| 浏览器绘制 | 17 fps | **26 fps** | `requestAnimationFrame` 合并 + 按高度分桶批量画点 |
+
+结论：**不是传输问题**（localhost 上 5.5 KB × 26 Hz ≈ 140 KB/s，带宽和解析都很轻松），
+主要还是**数据源**——仿真在带相机时只跑到 0.68 倍实时，雷达实际只有 7 Hz；
+其次是浏览器的逐点绘制开销。可调的旋钮：
+
+| 想要 | 做法 |
+| --- | --- |
+| 更高的实时率 | `./run_sim.sh --nav-only`（生成机器人时不带 1080p 相机，RTF 0.68 → 1.0） |
+| 更高/更低的数据频率 | 桥接参数 `status_rate` / `viz_rate` / `cloud_rate` |
+| 更小的网页帧 | `python3 web/web_server.py --cloud-max 200 --point-rate 8` |
+| 更顺的绘图 | 关掉不看的图层（点云/网格），缩放到关注区域 |
+
 实现说明：
 
 * 后端 `web/web_server.py` 是一个 rclpy 节点 + Flask（`threaded=True`）：

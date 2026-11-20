@@ -103,6 +103,29 @@ def quat_to_yaw(q: Quaternion) -> float:
                       1.0 - 2.0 * (q.z * q.z + q.y * q.y))
 
 
+def decode_xyz(msg: PointCloud2):
+    """Fast PointCloud2 -> (N, 3) float32 array of the x/y/z fields (or None)."""
+    n = int(msg.width) * int(msg.height)
+    if n <= 0 or msg.point_step <= 0 or not msg.data:
+        return None
+    fields = {f.name: f for f in msg.fields}
+    if not {'x', 'y', 'z'} <= fields.keys():
+        return None
+    raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+    if raw.size < n * msg.point_step:
+        n = raw.size // msg.point_step
+        if n <= 0:
+            return None
+        raw = raw[:n * msg.point_step]
+    rows = raw.reshape(n, msg.point_step)
+    xyz = np.empty((n, 3), dtype=np.float32)
+    for i, name in enumerate(('x', 'y', 'z')):
+        off = fields[name].offset
+        xyz[:, i] = np.frombuffer(rows[:, off:off + 4].tobytes(), dtype=np.float32)
+    finite = np.isfinite(xyz).all(axis=1)
+    return xyz[finite]
+
+
 def scalar(value) -> float:
     """float() for tensors (without the requires_grad warning) and plain numbers."""
     if hasattr(value, 'item'):
@@ -137,6 +160,9 @@ class NeuPANBridge(Node):
         self.declare_parameter('planner_config', '')
         self.declare_parameter('control_rate', 50.0)
         self.declare_parameter('publish_visualization', True)
+        self.declare_parameter('viz_rate', 15.0)      # plan/ref/markers publish rate [Hz]
+        self.declare_parameter('cloud_rate', 12.0)    # filtered cloud publish rate [Hz]
+        self.declare_parameter('status_rate', 20.0)   # /neupan_status rate [Hz]
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('relay_robot_tf', True)
 
@@ -278,6 +304,11 @@ class NeuPANBridge(Node):
         self.detour_step = float(self.get_parameter('detour_step').value)
 
         self._last_log = self.get_clock().now()
+        self._viz_at = 0.0
+        self._cloud_at = 0.0
+        self.viz_rate = max(1.0, float(self.get_parameter('viz_rate').value))
+        self.cloud_rate = max(1.0, float(self.get_parameter('cloud_rate').value))
+        self.status_rate = max(1.0, float(self.get_parameter('status_rate').value))
 
         # --------------------------- interfaces ------------------------------- #
         cloud_qos = QoSProfile(
@@ -306,7 +337,6 @@ class NeuPANBridge(Node):
 
         self.status_pub = self.create_publisher(String, '/neupan_status', 10)
         self.create_subscription(Empty, '/neupan_cancel', self.cancel_callback, 10)
-        self._status_timer = self.create_timer(1.0 / 5.0, self.publish_status)
 
         if self.publish_tf:
             self.tf_broadcaster = TransformBroadcaster(self)
@@ -334,6 +364,7 @@ class NeuPANBridge(Node):
 
         period = 1.0 / max(1.0, float(self.get_parameter('control_rate').value))
         self.timer = self.create_timer(period, self.control_loop)
+        self._status_timer = self.create_timer(1.0 / self.status_rate, self.publish_status)
 
         # ---------------------------- start-up -------------------------------- #
         if len(self.planner.waypoints) > 0:
@@ -662,21 +693,14 @@ class NeuPANBridge(Node):
     # Sensor processing
     # ------------------------------------------------------------------ #
     def _read_points(self, msg: PointCloud2):
-        """Return the xyz points of a PointCloud2 as a (3, N) float array."""
-        try:
-            raw = pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
-            if isinstance(raw, np.ndarray) and raw.dtype.names:
-                pts = np.stack([raw['x'], raw['y'], raw['z']], axis=1)
-            else:
-                pts = np.asarray(raw, dtype=np.float64).reshape(-1, 3)
-        except Exception as exc:  # pragma: no cover - malformed cloud
-            self.get_logger().warn(f'failed to read point cloud: {exc}',
-                                   throttle_duration_sec=5.0)
-            return None
-        if pts.size == 0:
-            return None
-        pts = pts[np.isfinite(pts).all(axis=1)]
-        if pts.size == 0:
+        """Return the xyz points of a PointCloud2 as a (3, N) float array.
+
+        ``sensor_msgs_py.point_cloud2.read_points`` builds one Python object per point
+        (12k points at 10 Hz is ~50% of a core), so the cloud is decoded straight from
+        the raw buffer with numpy instead.
+        """
+        pts = decode_xyz(msg)
+        if pts is None or pts.shape[0] == 0:
             return None
         return pts.T.astype(np.float64)
 
@@ -836,8 +860,10 @@ class NeuPANBridge(Node):
             self.get_logger().info('waiting for a reference path (click 2D Goal Pose)...',
                                    throttle_duration_sec=5.0)
             self._broadcast_robot_tf()
-            self._publish_obstacles()
-            self._publish_visualization(None)
+            if self._due('_cloud_at', self.cloud_rate):
+                self._publish_obstacles()
+            if self._due('_viz_at', self.viz_rate):
+                self._publish_visualization(None)
             self._publish_goal()
             return
 
@@ -849,11 +875,13 @@ class NeuPANBridge(Node):
 
         if self.arrived or self.failed:
             self._publish_stop()
-            self._publish_visualization(self.planner.info)
+            if self._due('_viz_at', self.viz_rate):
+                self._publish_visualization(self.planner.info)
             return
 
         action, info = self.planner(self.robot_state, self.obstacle_points)
-        self._publish_obstacles()
+        if self._due('_cloud_at', self.cloud_rate):
+            self._publish_obstacles()
 
         now_ts = time.time()
         self._check_stuck(now_ts)
@@ -941,6 +969,14 @@ class NeuPANBridge(Node):
     # ------------------------------------------------------------------ #
     # Visualization helpers
     # ------------------------------------------------------------------ #
+    def _due(self, attr, rate):
+        """True (and update the stamp) when ``rate`` Hz throttle allows a publish."""
+        now = time.time()
+        if now - getattr(self, attr) >= 1.0 / rate:
+            setattr(self, attr, now)
+            return True
+        return False
+
     def _publish_visualization(self, info):
         """Publish everything RViz needs; also runs while parked (arrived/failed)."""
         if not self.vis:
