@@ -6,6 +6,7 @@
 #   ./run_sim.sh --goal 6 -6 0        # drive to a specific goal at start-up
 #   ./run_sim.sh --gui                # also open the Gazebo GUI (viewer only)
 #   ./run_sim.sh --wait               # do not follow planner.yaml, wait for /goal_pose
+#   ./run_sim.sh --web                # also serve the web view on 127.0.0.1:8088
 #
 # Notes
 #  * Gazebo runs in server-only mode (-s): with the GUI attached the Sensors system
@@ -25,6 +26,8 @@ START_GUI=0
 START_BRIDGE=1
 START_REFEREE=0
 WAIT_FOR_GOAL=0
+START_WEB=0
+WEB_PORT=8088
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -35,6 +38,8 @@ while [ $# -gt 0 ]; do
         --gui) START_GUI=1; shift ;;
         --referee) START_REFEREE=1; shift ;;
         --wait) WAIT_FOR_GOAL=1; shift ;;
+        --web) START_WEB=1; shift ;;
+        --web-port) WEB_PORT=$2; shift 2 ;;
         --no-bridge) START_BRIDGE=0; shift ;;
         -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "unknown option: $1"; exit 2 ;;
@@ -134,12 +139,19 @@ if [ "$START_BRIDGE" = 1 ]; then
     sleep 3
 fi
 
+# ---------------------------------------------------------------- web
+if [ "$START_WEB" = 1 ]; then
+    echo "[4/5] starting the web view on http://127.0.0.1:$WEB_PORT/"
+    nohup python3 "$HERE/web/web_server.py" --port "$WEB_PORT" > "$LOG_DIR/web.log" 2>&1 &
+    sleep 2
+fi
+
 # ---------------------------------------------------------------- rviz
 if [ "$START_RVIZ" = 1 ]; then
     echo "[4/4] starting RViz"
     nohup rviz2 -d "$HERE/neupan.rviz" > "$LOG_DIR/rviz.log" 2>&1 &
 else
-    echo "[4/4] RViz not requested (use --rviz)"
+    echo "[5/5] RViz not requested (use --rviz)"
 fi
 
 sleep 2
@@ -148,6 +160,7 @@ echo "running:"
 echo "  gazebo  pid $GAZEBO_PID   ($LOG_DIR/gazebo.log)"
 echo "  topics : /$ROBOT/chassis_odometry_gt /$ROBOT/livox/lidar"
 echo "  command: /$ROBOT/robot_base/chassis_cmd"
+echo "  web    : http://127.0.0.1:$WEB_PORT/   (with --web)"
 echo "  goal   : ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \\"
 echo "             \"{header: {frame_id: map}, pose: {position: {x: 5.0, y: 0.0}}}\""
 echo

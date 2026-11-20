@@ -33,7 +33,11 @@ Published
     /dune_point_markers           visualization_msgs/MarkerArray
     /nrmp_point_markers           visualization_msgs/MarkerArray
     /robot_marker                 visualization_msgs/Marker  robot box
+    /neupan_status                std_msgs/String  JSON summary for the web UI (5 Hz)
     /tf, /tf_static               TF tree map -> odom -> base_footprint
+
+Subscribed (control)
+    /neupan_cancel                std_msgs/Empty   stop and clear the goal (web "stop")
 
 Run it with::
 
@@ -42,6 +46,7 @@ Run it with::
         --params-file example/fzsd2026/bridge_params.yaml
 """
 
+import json
 import math
 import os
 import sys
@@ -57,7 +62,7 @@ from geometry_msgs.msg import PoseStamped, Quaternion, TransformStamped, Twist
 from tf2_msgs.msg import TFMessage
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Header
+from std_msgs.msg import Empty, Header, String
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
@@ -264,6 +269,7 @@ class NeuPANBridge(Node):
         self._last_stuck_check = 0.0
         self._stuck_since = None
         self._got_goal = False
+        self._last_event = ''
         self._detour_attempts = 0
         self._stop_since = None
         self.failed = False
@@ -297,6 +303,10 @@ class NeuPANBridge(Node):
             self.dune_marker_pub = self.create_publisher(MarkerArray, '/dune_point_markers', 10)
             self.nrmp_marker_pub = self.create_publisher(MarkerArray, '/nrmp_point_markers', 10)
             self.robot_marker_pub = self.create_publisher(Marker, '/robot_marker', 10)
+
+        self.status_pub = self.create_publisher(String, '/neupan_status', 10)
+        self.create_subscription(Empty, '/neupan_cancel', self.cancel_callback, 10)
+        self._status_timer = self.create_timer(1.0 / 5.0, self.publish_status)
 
         if self.publish_tf:
             self.tf_broadcaster = TransformBroadcaster(self)
@@ -395,6 +405,19 @@ class NeuPANBridge(Node):
                          [quat_to_yaw(msg.pose.orientation)]]).reshape(3, 1)
         self.set_goal(goal)
 
+    def cancel_callback(self, _msg: Empty):
+        """Stop planning and drop the current goal (web UI "stop" button)."""
+        self.goal = None
+        self.arrived = True          # the control loop publishes zero velocity
+        self.failed = False
+        self._detour_attempts = 0
+        self._stuck_since = None
+        self._stop_since = None
+        self._last_event = 'cancelled by user'
+        self.planner.reset()
+        self._publish_stop()
+        self.get_logger().info('cancelled: goal cleared, robot stopped')
+
     def initial_path_callback(self, msg: Path):
         if len(msg.poses) < 2:
             return
@@ -417,6 +440,7 @@ class NeuPANBridge(Node):
         self.failed = False
         self._detour_attempts = 0
         self._reference_goal = goal.copy()
+        self._last_event = f'new goal ({goal[0, 0]:.2f}, {goal[1, 0]:.2f})'
         self.get_logger().info(
             f'new goal ({goal[0, 0]:.2f}, {goal[1, 0]:.2f}, {goal[2, 0]:.2f})')
         self._update_reference_path(reason='new goal', force=True)
@@ -550,6 +574,7 @@ class NeuPANBridge(Node):
                 self._stuck_since = None
                 if not self._try_detour():
                     self.failed = True
+                    self._last_event = 'blocked: no way around, stopped'
                     self.get_logger().warn(
                         'no way around the blockage left; stopping (send a new goal to '
                         'retry)', throttle_duration_sec=2.0)
@@ -626,6 +651,8 @@ class NeuPANBridge(Node):
         self.arrived = False
         if self.vis:
             self._publish_path(self.global_path_pub, waypoints)
+        self._last_event = (f'detour #{self._detour_attempts}: '
+                            f'{"left" if side > 0 else "right"} {lateral:.1f} m')
         self.get_logger().info(
             f'detour #{self._detour_attempts}: lateral {lateral:.1f} m to the '
             f'{"left" if side > 0 else "right"} (clearance score {score:.2f})')
@@ -746,6 +773,52 @@ class NeuPANBridge(Node):
         self.local_grid.update(cloud, stamp=time.time())
 
     # ------------------------------------------------------------------ #
+    # Status (web UI / debugging)
+    # ------------------------------------------------------------------ #
+    def _mode(self):
+        if self.robot_state is None:
+            return 'no odometry'
+        if self.failed:
+            return 'failed'
+        if self.arrived:
+            return 'idle' if self.goal is None else 'arrived'
+        if self.planner.initial_path is None:
+            return 'waiting for goal'
+        return 'driving'
+
+    def _status_dict(self):
+        state = self.robot_state
+        goal = self.goal
+        dune = self.planner.dune_points
+        nrmp = self.planner.nrmp_points
+        return {
+            'mode': self._mode(),
+            'event': self._last_event,
+            'pose': None if state is None else [round(float(state[0, 0]), 3),
+                                                round(float(state[1, 0]), 3),
+                                                round(float(state[2, 0]), 3)],
+            'cmd': [round(float(self._last_action[0]), 3),
+                    round(float(self._last_action[1]), 3)],
+            'goal': None if goal is None else [round(float(goal[0, 0]), 2),
+                                               round(float(goal[1, 0]), 2),
+                                               round(float(goal[2, 0]), 2)],
+            'min_dist': round(scalar(self.planner.min_distance), 3),
+            'points': 0 if self.obstacle_points is None else int(self.obstacle_points.shape[1]),
+            'dune_points': 0 if dune is None else int(np.asarray(dune).shape[1]),
+            'nrmp_points': 0 if nrmp is None else int(np.asarray(nrmp).shape[1]),
+            'lidar_height': round(self.lidar_height, 3),
+            'box': [self.box_length, self.box_width, self.box_height],
+            'z_robot': self.z_robot,
+            'max_linear': self.max_linear,
+            'kinematics': 'omni' if self.omni else 'diff',
+        }
+
+    def publish_status(self):
+        msg = String()
+        msg.data = json.dumps(self._status_dict(), ensure_ascii=False)
+        self.status_pub.publish(msg)
+
+    # ------------------------------------------------------------------ #
     # Control loop
     # ------------------------------------------------------------------ #
     def control_loop(self):
@@ -797,6 +870,7 @@ class NeuPANBridge(Node):
                 self.arrived = True
                 where = ('end of the reference path' if self.goal is None
                          else f'distance {distance_to_goal:.2f} m')
+                self._last_event = f'arrived ({where})'
                 self.get_logger().info(f'>>> arrived ({where})', throttle_duration_sec=1.0)
                 self._publish_stop()
             else:

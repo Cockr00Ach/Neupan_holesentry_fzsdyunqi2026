@@ -17,9 +17,35 @@
         │                            │                              │
         ▼                            ▼                              ▼
   <robot_ns>/robot_base/chassis_cmd   /neupan_*  话题（RViz）      map→odom→base_footprint
-        │
-        ▼
-  rmoss_gz_base（底盘控制器） → Gazebo MecanumDrive2 → 机器人运动
+        │                            │
+        │                            └──────────► web/web_server.py ──► 浏览器
+        │                                         （JSON + SSE）        http://127.0.0.1:8088/
+        ▼                                                                 ▲
+  rmoss_gz_base（底盘控制器） → Gazebo MecanumDrive2 → 机器人运动          │
+        └──────────── /goal_pose /neupan_cancel ◄─────────────────────────┘
+```
+
+目录结构：
+
+```
+example/fzsd2026/
+├── neupan_ros2_bridge.py     ROS 2 桥接节点（雷达→NeuPAN→底盘，核心）
+├── planner.yaml              3D 盒模型 NeuPAN 配置
+├── bridge_params.yaml        桥接节点参数
+├── web/                      网页端（web_server.py + static/index.html）
+├── model/                    3D DUNE 训练权重
+├── map/                      扫描出的仿真地图（实验性）
+├── img/                      README 用的截图
+├── run_sim.sh / stop_sim.sh  一键启动 / 关闭仿真 + 桥接 + 网页
+├── run_web.sh                只启动网页端
+├── check_all.sh              验收脚本（4 个场景）
+├── smoke_test_irsim.py       irsim 离线回归
+├── test_sim_goal.py          仿真单目标点验收
+├── test_sim_dynamic.py       仿真动态绕障验收
+├── local_grid.py             滚动占据栅格 + A*
+├── global_planner.py         静态地图 A*
+├── build_map_from_lidar.py   用仿真扫描出地图（实验性）
+└── run_demo*.py              irsim 可视化演示
 ```
 
 ![RViz 中的 NeuPAN 规划结果](img/rviz_neupan.png)
@@ -99,7 +125,49 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | `global_map` | `''` | 地图 yaml（`use_global_planner=true` 时必填） |
 | `max_detours` / `detour_step` | `4` / `0.9` | 卡死时侧向让开的次数与步长 [m] |
 
-## 4. 验证结果
+## 4. 网页端（把 RViz 搬到浏览器）
+
+![网页端](img/web_ui.png)
+
+```bash
+./run_sim.sh --web            # 仿真 + 桥接 + 网页端（打印 http://127.0.0.1:8088/）
+# 或者只要网页端（仿真/桥接已在跑，或上实车）：
+./run_web.sh                  # http://127.0.0.1:8088/
+./run_web.sh --port 8090      # 换端口
+```
+
+浏览器打开后就是一张实时俯视图，内容和 RViz 一致：
+
+| 区域 | 内容 |
+| --- | --- |
+| 主画布 | 障碍点云（按高度着色）、DUNE/NRMP 采样点、参考路径（虚线）、参考状态（蓝）、MPC 优化轨迹（红）、A* 路径（绿）、机器人盒模型 + 速度箭头、目标点 |
+| 右上 3D 视图 | 同一场景的高度方向投影（机器人盒子、点云高度、目标点），直观看出这是 **3D** 盒模型规划 |
+| 状态条 | 状态（driving/idle/arrived/failed）、位姿、速度、最小障碍间距（<0.15 m 变红）、点数 / DUNE 点数 |
+| 事件 | 最近的目标、到点、卡死绕行、急停等事件 |
+| 交互 | 滚轮缩放、拖拽平移、`目标模式`（快捷键 G）后左键点地图设点、双击回中、`全览`、`跟随`（F）、`急停`（S） |
+
+接口（给自己的脚本/其它前端用）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/state` | 当前一帧完整 JSON |
+| GET | `/api/stream` | SSE 推流，帧率约 20 Hz（数据变化时才推） |
+| POST | `/api/goal` | `{"x": 1.0, "y": 2.0, "yaw": 0}` → 发布 `/goal_pose` |
+| POST | `/api/stop` | 发布 `/neupan_cancel`：停车 + 清空目标 |
+| GET | `/api/health` | `{"ok":true,"mode":"driving","ros":true,...}` |
+
+实现说明：
+
+* 后端 `web/web_server.py` 是一个 rclpy 节点 + Flask（`threaded=True`）：
+  订阅 `/neupan_status`（桥接节点 5 Hz 发的 JSON 汇总）、`/neupan_obstacles`、
+  `/neupan_plan`、`/neupan_ref_state`、`/neupan_initial_path`、`/neupan_global_path`、
+  `/dune_point_markers`、`/nrmp_point_markers`，合成一帧 JSON 用 SSE 推给浏览器；
+  点云抽稀到 350 点（`--cloud-max`）、限速 10 Hz（`--point-rate`），一帧约 10–20 KB。
+* 前端是一个自包含的 HTML（无外部 CDN、无构建步骤），Canvas 2D 画俯视图和等轴测 3D 视图。
+* 网页端只读规划器话题、只写 `/goal_pose` 和 `/neupan_cancel`，不直接碰底盘，
+  所以桥接不启动时它也能安全地空转。
+
+## 5. 验证结果
 
 以下都是本机实测（`rmul_2025` 场地，红方出生点 `(-5.0, 3.0)`）。
 
@@ -111,11 +179,12 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | 仿真动态绕障 | `./run_sim.sh --wait` 后 `python3 example/fzsd2026/test_sim_dynamic.py` | 蓝车停在红车路径 `(3.27,-0.61)`，红车 **18–28 s** 绕行到 `(5.5,-1.5)`，两车最小中心距 **0.56–1.81 m**（多次运行），PASS |
 | 仿真单目标点 | `./run_sim.sh --wait` 后 `test_sim_goal.py --goal -3 -2 0` | **5.4 s** 到点，3 s 后速度 0.000 m/s（确实停住） |
 | 目标不可达（场地死角） | `test_sim_goal.py --goal 5 -4.5 0` | 尝试 4 次侧向绕行后安全停车（不撞、不顶死），打印 `still in collision after the detours` |
+| 网页端收发 | `./run_sim.sh --web` 后浏览器/`curl` | `/api/health` 正常；网页发目标 `(-3,-3)` → 机器人 12 s 内到点；`/api/stop` → 立刻 `idle`、速度 0、目标清空 |
 
 `test_sim_dynamic.py` 的判定：到达目标 **且** 两车中心距 > 0.55 m（对应盒模型不接触）。
-三个场景可以用 `./check_all.sh` 一次性复跑（结束后自动关掉仿真）。
+四个场景可以用 `./check_all.sh` 一次性复跑（结束后自动关掉仿真）。
 
-## 5. 测试脚本
+## 6. 测试脚本
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/fzsd2026/install/setup.bash
@@ -130,7 +199,7 @@ python3 test_sim_dynamic.py --goal 5.5 -1.5 --blocker-goal 1.5 1.5
 `test_sim_goal.py` 会把轨迹写成 CSV（`--csv`，默认 `/tmp/neupan_goal_trace.csv`），
 `test_sim_dynamic.py` 打印最小中心距并给出 PASS/FAIL。
 
-## 6. NeuPAN 3D 改造说明（相对上游 1.3）
+## 7. NeuPAN 3D 改造说明（相对上游 1.3）
 
 哨兵车体近似为 0.6×0.5×0.5 m 的盒子，因此把 NeuPAN 的“2D 多边形机器人 + 2D 点云”
 扩展成“3D 盒子机器人 + 3D 点云”：
@@ -184,7 +253,7 @@ planner.train_dune()
 
 已用一个 3 维数据的小规模训练 + 续训烟囱测试验证过（`(32, 3)` 输入层、`model_0/2/4.pth`）。
 
-## 7. irsim 可视化演示（不依赖 ROS）
+## 8. irsim 可视化演示（不依赖 ROS）
 
 ```bash
 cd src/NeuPAN
@@ -195,7 +264,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 `env.yaml` 是仿真环境（障碍物、机器人初始位姿、目标点），`planner.yaml` 是规划器配置；
 两个 demo 都从机器人当前位姿到 `env.yaml` 的目标点生成参考路径。
 
-## 8. 已知限制 / 注意事项
+## 9. 已知限制 / 注意事项
 
 1. **目标落在窄死角内时不会强行挤进去**：如 `(5.0,-4.5)`（蓝车与场地图元之间），
    机器人会尝试至多 `max_detours` 次侧向绕行，仍无法通过则安全停车并打印原因。
@@ -223,7 +292,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
    位移 < 0.05 m）或安全停车时，用滚动栅格评估左右两侧净空，插入一个侧向中间航点绕行。
    `use_local_planner: true` 可改成持续用栅格 A* 生成参考路径（实验特性，容易抖动）。
 
-## 9. 修过的仿真侧问题
+## 10. 修过的仿真侧问题
 
 * `rmoss_gz_plugins/LightBarController` 原实现在应用灯光颜色时**删除并重建** `light_bar_visual`
   实体；Gazebo 6 的 Sensors 渲染线程会并发重建同名 visual，导致 headless 模式启动机器人时
@@ -234,7 +303,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 * `run_sim.sh` 已把 `IGN_GAZEBO_RESOURCE_PATH` 补齐到 `fzsd2026_robot_description` 的
   `resource/models`，否则 `spawn_robots` 找不到 `model://rplidar_a2/...`。
 
-## 10. 文件清单
+## 11. 文件清单
 
 | 文件 | 说明 |
 | --- | --- |
@@ -246,7 +315,10 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 | `build_map_from_lidar.py` | 用运行中的仿真扫描出 map_server 地图（实验性） |
 | `local_grid.py` | 滚动占据栅格 + A*（卡死绕行方向评估 / 实验参考路径） |
 | `run_sim.sh` / `stop_sim.sh` | 一键启动 / 关闭 |
-| `check_all.sh` | 三个验收场景一键复跑 |
+| `check_all.sh` | 四个验收场景（含网页端）一键复跑 |
 | `test_sim_goal.py` / `test_sim_dynamic.py` | 仿真验收脚本 |
+| `web/web_server.py` | 网页端后端（ROS 话题 ⇄ JSON/SSE/HTTP） |
+| `web/static/index.html` | 网页端前端（Canvas 俯视图 + 3D 视图，自包含） |
+| `run_web.sh` | 只启动网页端 |
 | `neupan.rviz` / `img/` | RViz 配置（`map` 坐标系）、截图 |
 | `model/` | DUNE 训练权重与训练记录 |
