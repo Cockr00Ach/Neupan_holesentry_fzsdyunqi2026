@@ -313,7 +313,9 @@ class robot:
         return to_device(A), to_device(B), to_device(C) 
     
     def linear_omni_model(self, nom_u, dt):
-        
+
+        if torch.is_tensor(nom_u):
+            nom_u = nom_u.detach()  # building the matrices only needs the values
         phi = nom_u[1, 0]
         v = nom_u[0, 0]
 
