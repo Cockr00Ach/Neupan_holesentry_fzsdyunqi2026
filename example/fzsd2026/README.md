@@ -108,8 +108,8 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | irsim 离线回归 | `python3 example/fzsd2026/smoke_test_irsim.py` | 600 步内到点，最近障碍 0.40 m，退出码 0 |
 | 栅格 A* 自检 | `python3 example/fzsd2026/local_grid.py` | 绕墙 13.33 m（直线 10 m），自检通过 |
 | 仿真直行到点 | `./run_sim.sh` | `(-5,3) → (5,0)` 约 **9–10 s**，最小障碍间距 0.30 m，到点正常停车 |
-| 仿真动态绕障 | `./run_sim.sh --wait` 后 `python3 example/fzsd2026/test_sim_dynamic.py` | 蓝车停在红车路径 `(3.26,-0.61)`，红车 **27.7 s** 绕行到 `(5.5,-1.5)`，两车最小中心距 **1.01 m**，PASS |
-| 仿真单目标点 | `./run_sim.sh --wait` 后 `test_sim_goal.py --goal -3 -2 0` | **5.6 s** 到点，3 s 后速度 0.000 m/s（确实停住） |
+| 仿真动态绕障 | `./run_sim.sh --wait` 后 `python3 example/fzsd2026/test_sim_dynamic.py` | 蓝车停在红车路径 `(3.27,-0.61)`，红车 **18–28 s** 绕行到 `(5.5,-1.5)`，两车最小中心距 **0.56–1.81 m**（多次运行），PASS |
+| 仿真单目标点 | `./run_sim.sh --wait` 后 `test_sim_goal.py --goal -3 -2 0` | **5.4 s** 到点，3 s 后速度 0.000 m/s（确实停住） |
 | 目标不可达（场地死角） | `test_sim_goal.py --goal 5 -4.5 0` | 尝试 4 次侧向绕行后安全停车（不撞、不顶死），打印 `still in collision after the detours` |
 
 `test_sim_dynamic.py` 的判定：到达目标 **且** 两车中心距 > 0.55 m（对应盒模型不接触）。

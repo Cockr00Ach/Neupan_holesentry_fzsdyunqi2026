@@ -11,9 +11,10 @@ set +u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$HERE" || exit 1
 
+WS=$(cd "$HERE/../../../.." && pwd)
 source /opt/ros/humble/setup.bash
-if [ -f /home/baymaxwish/fzsd2026/install/setup.bash ]; then
-    source /home/baymaxwish/fzsd2026/install/setup.bash
+if [ -f "$WS/install/setup.bash" ]; then
+    source "$WS/install/setup.bash"
 fi
 
 FAIL=0
