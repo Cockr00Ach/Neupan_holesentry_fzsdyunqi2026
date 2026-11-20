@@ -191,6 +191,10 @@ class NRMP(torch.nn.Module):
             if isinstance(q_s_value, (list, np.ndarray)):
                 value = q_s_value[0]
                 print(f"q_s should be a scalar when initialized as scalar, got list/array with {len(q_s_value)} elements. Using the first element: {value}")
+            else:
+                # scalar initialisation + scalar update: this used to raise
+                # UnboundLocalError ('value' referenced before assignment)
+                value = q_s_value
 
             self.q_s = value_to_tensor(value, True)
 

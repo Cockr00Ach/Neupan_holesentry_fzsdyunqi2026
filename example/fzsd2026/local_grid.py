@@ -126,13 +126,22 @@ class LocalGrid:
                 return best[1], best[2]
         return None
 
-    def plan(self, start_xy, goal_xy, inflation_radius=0.4, max_expansions=120000):
+    def plan(self, start_xy, goal_xy, inflation_radius=0.4, max_expansions=120000,
+             free_start=True):
         """A* between two world positions.
+
+        The start cell is allowed to be inside the inflated band (the robot is already
+        there); only the real occupancy blocks it, otherwise hugging a wall would snap
+        the search start far away and produce a nonsense path.
 
         Returns a list of ``[x, y, yaw]`` waypoints (start -> goal) or ``None``.
         """
         grid = self.inflated_occupancy(inflation_radius)
-        start = self._nearest_free(*self.world_to_grid(start_xy), grid=grid)
+        gx0, gy0 = self.world_to_grid(start_xy)
+        if (free_start and self.in_bounds(gx0, gy0)
+                and not self.occupied().reshape(self.height, self.width)[gy0, gx0]):
+            grid[gy0, gx0] = False
+        start = self._nearest_free(gx0, gy0, grid=grid)
         goal = self._nearest_free(*self.world_to_grid(goal_xy), grid=grid)
         if start is None or goal is None:
             return None

@@ -20,6 +20,7 @@ Topics it reads (published by ``neupan_ros2_bridge.py``)
 Topics it writes
     /goal_pose                geometry_msgs/PoseStamped   (click on the map)
     /neupan_cancel            std_msgs/Empty              ("stop" button)
+    /neupan_set_params        std_msgs/String             (live planner tuning, JSON)
 
 Run it standalone::
 
@@ -49,6 +50,23 @@ from visualization_msgs.msg import MarkerArray
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, 'static')
+
+# Live-tunable NeuPAN parameters: name, label, range and what it does. Served to the
+# UI so the sliders and the topic share one definition.
+PARAM_SPECS = [
+    {'name': 'q_s', 'label': 'q_s 路径跟踪权重', 'min': 0.1, 'max': 20.0, 'step': 0.1,
+     'hint': '越大越贴着参考路径走（太小会绕圈，太大会卡在障碍前）'},
+    {'name': 'p_u', 'label': 'p_u 速度代价', 'min': 0.1, 'max': 5.0, 'step': 0.1,
+     'hint': '越大越倾向于减速'},
+    {'name': 'eta', 'label': 'eta 避障权重', 'min': 1.0, 'max': 40.0, 'step': 0.5,
+     'hint': '越大越保守，离障碍越远'},
+    {'name': 'd_max', 'label': 'd_max 避障作用距离 [m]', 'min': 0.15, 'max': 1.5,
+     'step': 0.05, 'hint': '障碍进入这个距离就开始干预'},
+    {'name': 'd_min', 'label': 'd_min 允许最小距离 [m]', 'min': 0.01, 'max': 0.5,
+     'step': 0.01, 'hint': '碰撞约束的软下界'},
+    {'name': 'ref_speed', 'label': 'ref_speed 参考速度 [m/s]', 'min': 0.3, 'max': 3.0,
+     'step': 0.1, 'hint': '参考路径的速度上限（靠近障碍时会自动降速叠加）'},
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +133,7 @@ class WebBridge(Node):
 
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.cancel_pub = self.create_publisher(Empty, '/neupan_cancel', 10)
+        self.params_pub = self.create_publisher(String, '/neupan_set_params', 10)
         self.get_logger().info('web bridge ready')
 
     # ---- callbacks -------------------------------------------------------- #
@@ -165,6 +184,12 @@ class WebBridge(Node):
     def cancel(self):
         self.cancel_pub.publish(Empty())
         self.get_logger().info('web cancel')
+
+    def set_params(self, payload: dict):
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.params_pub.publish(msg)
+        self.get_logger().info(f'web params: {payload}')
 
 
 NODE = None
@@ -246,6 +271,42 @@ def api_stop():
         return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
     NODE.cancel()
     return jsonify({'ok': True})
+
+
+@app.route('/api/params', methods=['GET'])
+def api_params_get():
+    status = STORE.snapshot().get('status', {})
+    return jsonify({
+        'specs': PARAM_SPECS,
+        'current': status.get('adjust', {}),
+        'defaults': status.get('adjust_defaults', {}),
+        'ref_speed': status.get('ref_speed'),
+        'ref_speed_default': status.get('ref_speed_default'),
+    })
+
+
+@app.route('/api/params', methods=['POST'])
+def api_params_set():
+    if NODE is None:
+        return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
+    payload = request.get_json(silent=True) or {}
+    if payload.get('reset'):
+        NODE.set_params({'reset': True})
+        return jsonify({'ok': True, 'reset': True})
+    values = {}
+    for spec in PARAM_SPECS:
+        name = spec['name']
+        if name not in payload:
+            continue
+        try:
+            value = float(payload[name])
+        except (TypeError, ValueError):
+            continue
+        values[name] = min(spec['max'], max(spec['min'], value))
+    if not values:
+        return jsonify({'ok': False, 'error': 'no valid parameter in the request'}), 400
+    NODE.set_params(values)
+    return jsonify({'ok': True, 'applied': values})
 
 
 @app.route('/api/health')

@@ -36,13 +36,19 @@ neupan_bridge:
     # reference-path planning on the rolling occupancy grid built from the lidar
     # (A* on live observations; unknown space is assumed free, NeuPAN handles safety)
     use_local_grid: true      # keep the rolling occupancy grid (clearance, detours)
-    use_local_planner: false  # A* reference path on that grid (experimental)
+    use_local_planner: true   # A* reference path on that grid (global constraint)
     local_grid_size: [40.0, 40.0]
     local_grid_resolution: 0.1
     local_grid_decay: 6.0
-    local_inflation: 0.5
+    local_inflation: 0.45      # 机器人半径 + 余量：比这更窄的缝不会进参考路径
     local_lookahead: 4.0
-    replan_interval: 1.0
+    replan_interval: 0.8
+    max_path_deviation: 2.0    # 偏离参考路径超过这个距离才重新锚定
+    max_recoveries: 8          # 连续“卡死/抽搐”的恢复尝试上限
+    reverse_speed: 0.40        # 卡在缝里时倒退脱困的速度
+    speed_adapt: true          # 靠近障碍自动降参考速度
+    min_ref_speed: 0.45
+    slowdown_distance: 1.2
 
     goal_tolerance: 0.35
     # false -> ignore the planner.yaml waypoints and wait for a /goal_pose

@@ -145,6 +145,22 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | 状态条 | 状态（driving/idle/arrived/failed）、位姿、速度、最小障碍间距（<0.15 m 变红）、点数 / DUNE 点数 |
 | 事件 | 最近的目标、到点、卡死绕行、急停等事件 |
 | 交互 | 滚轮缩放、拖拽平移、`目标模式`（快捷键 G）后左键点地图设点、双击回中、`全览`、`跟随`（F）、`急停`（S） |
+| 规划参数 | 6 个滑条实时调 NeuPAN：`q_s`（贴路径程度）、`p_u`（速度代价）、`eta`（避障权重）、`d_max`/`d_min`（避障距离）、`ref_speed`（参考速度）；拖动立即生效，**恢复默认**按钮回到 `planner.yaml` 的值 |
+
+### 实时调参（为什么有用）
+
+障碍物很宽、偏离参考路径很大时，NeuPAN 会左右抽搐、原地打转 —— 这是“贴路径”和“避障”两个代价在打架。
+把 `q_s`（状态/路径跟踪权重）调大能明显改善，但调太大就会贴着障碍停下。实测（`(3.66,-2.02) → (-3.64,2.02)`，
+两块板之间穿梭的场景，20 Hz 记录 + `web/analyse_run.py` 统计）：
+
+| 参数 | 到达 | 用时 | 轨迹长度 / 直线长度 | 说明 |
+| --- | --- | --- | --- | --- |
+| `q_s=1`（默认） | 是 | 18.1 s | 28.7 m / 8.3 m | 大幅左右找路，绕了 3 倍 |
+| `q_s=4` | 是 | **13.5 s** | 25.8 m / 8.3 m | 明显贴路径，抽搐减少 |
+| `q_s=10` | **否** | — | — | 太贴路径，卡在障碍前不动 |
+
+所以网页端给了滑条：先 `q_s` 加一点（2~4）看效果，再微调 `eta`；不合适点 **恢复默认** 即可。
+参数只改运行中的节点，不写回 yaml；重启/重新 `./run_sim.sh` 后回到文件里的值。
 
 接口（给自己的脚本/其它前端用）：
 
@@ -154,6 +170,8 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | GET | `/api/stream` | SSE 推流，帧率约 20 Hz（数据变化时才推） |
 | POST | `/api/goal` | `{"x": 1.0, "y": 2.0, "yaw": 0}` → 发布 `/goal_pose` |
 | POST | `/api/stop` | 发布 `/neupan_cancel`：停车 + 清空目标 |
+| GET | `/api/params` | 可调参数的定义（范围/说明）+ 当前值 + 默认值 |
+| POST | `/api/params` | `{"q_s": 4}` 实时调参；`{"reset": true}` 恢复默认（转发到 `/neupan_set_params`） |
 | GET | `/api/health` | `{"ok":true,"mode":"driving","ros":true,...}` |
 
 ### 帧率：瓶颈在哪（实测数据）
@@ -218,6 +236,11 @@ python3 smoke_test_irsim.py                                  # 无需 ROS，irsi
 python3 local_grid.py                                        # 占据栅格 + A* 自检
 python3 test_sim_goal.py --goal 5 0 0 --timeout 60           # 仿真单目标点（含停车校验）
 python3 test_sim_dynamic.py --goal 5.5 -1.5 --blocker-goal 1.5 1.5
+
+python3 test_sim_twitch.py --start 3.66 -2.02 --goal -3.64 2.02   # 两块板之间穿梭
+python3 web/spawn_wall.py --x 0 --y 1.5 --length 6 --boxes 8      # 摆一面 6 m 宽的墙
+python3 web/spawn_wall.py --clear                                 # 清掉
+bash web/bench.sh qs4 /tmp/planner_qs4.yaml                       # 换配置跑一轮并统计
 ```
 
 `test_sim_goal.py` 会把轨迹写成 CSV（`--csv`，默认 `/tmp/neupan_goal_trace.csv`），
@@ -290,7 +313,9 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 
 ## 9. 已知限制 / 注意事项
 
-1. **目标落在窄死角内时不会强行挤进去**：如 `(5.0,-4.5)`（蓝车与场地图元之间），
+1. **宽障碍 / 偏离路径较大时的抽搐**：已经在桥接里加了“参考路径 A*（带 0.45 m 膨胀，窄于车宽的缝不进路径）+ 卡死检测 + 倒退脱困 + 靠近障碍自动降参考速度”，
+   并且可以在网页端实时调 `q_s / eta / d_max / d_min` 观察效果（见第 4 节实测表）。仍无法通过时安全停车并报 `stuck (...)`。
+2. **目标落在窄死角内时不会强行挤进去**：如 `(5.0,-4.5)`（蓝车与场地图元之间），
    机器人会尝试至多 `max_detours` 次侧向绕行，仍无法通过则安全停车并打印原因。
    发一个新目标即可重试。
 2. **工作区里的静态地图与 Gazebo 世界对不上**：`pb2025_nav_bringup/map/simulation/rmul_2025.pgm`
@@ -337,6 +362,9 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 | `env.yaml` / `run_demo*.py` | irsim 演示 |
 | `global_planner.py` | 静态地图 A*（可选） |
 | `build_map_from_lidar.py` | 用运行中的仿真扫描出 map_server 地图（实验性） |
+| `test_sim_twitch.py` | “两块板之间穿梭/原地抽搐”回归测试 |
+| `web/spawn_wall.py` | 在仿真里摆一面可调的墙（做宽障碍实验） |
+| `web/bench.sh` / `web/analyse_run.py` | 换参数跑一轮 + 从 rosbag 统计轨迹质量 |
 | `local_grid.py` | 滚动占据栅格 + A*（卡死绕行方向评估 / 实验参考路径） |
 | `run_sim.sh` / `stop_sim.sh` | 一键启动 / 关闭 |
 | `check_all.sh` | 四个验收场景（含网页端）一键复跑 |

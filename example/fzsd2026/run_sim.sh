@@ -31,6 +31,7 @@ WAIT_FOR_GOAL=0
 START_WEB=0
 WEB_PORT=8088
 NAV_ONLY=0
+PLANNER_CONFIG=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
         --wait) WAIT_FOR_GOAL=1; shift ;;
         --web) START_WEB=1; shift ;;
         --nav-only) NAV_ONLY=1; shift ;;
+        --planner-config) PLANNER_CONFIG=$2; shift 2 ;;
         --web-port) WEB_PORT=$2; shift 2 ;;
         --no-bridge) START_BRIDGE=0; shift ;;
         -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
@@ -140,6 +142,13 @@ if [ "$START_BRIDGE" = 1 ]; then
     fi
     if [ "$WAIT_FOR_GOAL" = 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS -p use_startup_waypoints:=false"
+    fi
+    if [ -n "$PLANNER_CONFIG" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS -p planner_config:=$PLANNER_CONFIG"
+    fi
+    # extra ROS parameters for experiments, e.g. NEUPAN_BRIDGE_ARGS="-p local_inflation:=0.7"
+    if [ -n "${NEUPAN_BRIDGE_ARGS:-}" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS $NEUPAN_BRIDGE_ARGS"
     fi
     nohup python3 "$HERE/neupan_ros2_bridge.py" --ros-args \
         --params-file "$HERE/bridge_params.yaml" $EXTRA_ARGS \

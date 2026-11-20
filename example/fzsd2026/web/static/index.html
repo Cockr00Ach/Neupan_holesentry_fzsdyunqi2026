@@ -73,6 +73,16 @@
   .layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .layers input { accent-color: var(--accent); }
   .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .params { display: flex; flex-direction: column; gap: 7px; }
+  .param label { display: flex; justify-content: space-between; align-items: baseline;
+                 margin-bottom: 2px; font-size: 12px; color: #b9c4d4; }
+  .param label b { color: #fff; font-variant-numeric: tabular-nums; }
+  .param input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
+  .param-row { display: flex; align-items: center; gap: 8px; }
+  .params-head { display: flex; align-items: center; justify-content: space-between;
+                 margin-bottom: 8px; }
+  .params-note { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.4; }
+  .btn-mini { padding: 3px 9px; font-size: 12px; border-radius: 6px; }
   #log { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow: auto;
          font-variant-numeric: tabular-nums; }
   #log li { padding: 3px 0; border-bottom: 1px dashed #1e2836; color: #c8d2e0; }
@@ -133,6 +143,14 @@
         <label><input type="checkbox" data-layer="astar" checked><span class="swatch" style="background:var(--accent)"></span>A* 路径</label>
         <label><input type="checkbox" data-layer="grid" checked><span class="swatch" style="background:#243041"></span>网格</label>
       </div>
+    </div>
+    <div class="card">
+      <div class="params-head">
+        <h3 style="margin:0">规划参数（实时）</h3>
+        <button class="btn-mini" id="btn-reset-params" title="恢复 planner.yaml 里的默认值">恢复默认</button>
+      </div>
+      <div class="params" id="params"></div>
+      <div class="params-note">拖动立即生效（只改运行中的参数，不写回 yaml）。q_s 变大更贴路径、eta 变大更保守。</div>
     </div>
     <div class="card" style="flex:1; display:flex; flex-direction:column; min-height:0;">
       <h3>事件</h3>
@@ -507,6 +525,8 @@
     };
   }
   connect();
+  loadParams();
+  setInterval(loadParams, 15000);   // pick up defaults/spec changes
   setInterval(() => {
     if (!lastMsg) return;
     const age = (Date.now() - lastMsg) / 1000;
@@ -536,6 +556,7 @@
     }
     setChips(st);
     logEvent(st.event);
+    syncParams(st);
     scheduleDraw();
     state.frames++;
     const now = performance.now();
@@ -654,6 +675,91 @@
     else if (k === 'f') $('btn-follow').click();
     else if (k === 's') $('btn-stop').click();
   });
+
+  // --------------------------------------------------------------- parameters
+  const paramState = { specs: [], current: {}, defaults: {}, dragging: null,
+                       pending: {}, timer: 0 };
+
+  async function loadParams() {
+    try {
+      const r = await fetch('/api/params');
+      const j = await r.json();
+      paramState.specs = j.specs || [];
+      paramState.current = j.current || {};
+      paramState.defaults = j.defaults || {};
+      if (j.ref_speed !== undefined && j.ref_speed !== null) {
+        paramState.current.ref_speed = j.ref_speed;
+        paramState.defaults.ref_speed = j.ref_speed_default;
+      }
+      buildParamPanel();
+    } catch (e) { /* server not ready yet */ }
+  }
+
+  function buildParamPanel() {
+    const host = $('params');
+    if (!host || host.dataset.built === '1') return;
+    host.dataset.built = '1';
+    for (const spec of paramState.specs) {
+      const wrap = document.createElement('div');
+      wrap.className = 'param';
+      const value = paramState.current[spec.name];
+      const shown = (value === undefined || value === null) ? '--' : Number(value).toFixed(2);
+      wrap.innerHTML = `
+        <label title="${spec.hint || ''}"><span>${spec.label}</span><b id="pv-${spec.name}">${shown}</b></label>
+        <input type="range" id="ps-${spec.name}" data-param="${spec.name}"
+               min="${spec.min}" max="${spec.max}" step="${spec.step}"
+               value="${value === undefined || value === null ? spec.min : value}">`;
+      host.appendChild(wrap);
+      const input = wrap.querySelector('input');
+      input.addEventListener('pointerdown', () => { paramState.dragging = spec.name; });
+      input.addEventListener('pointerup', () => { paramState.dragging = null; });
+      input.addEventListener('input', () => {
+        const v = parseFloat(input.value);
+        $('pv-' + spec.name).textContent = v.toFixed(2);
+        paramState.pending[spec.name] = v;
+        clearTimeout(paramState.timer);
+        paramState.timer = setTimeout(flushParams, 180);
+      });
+    }
+  }
+
+  async function flushParams() {
+    const payload = Object.assign({}, paramState.pending);
+    paramState.pending = {};
+    if (!Object.keys(payload).length) return;
+    try {
+      const r = await fetch('/api/params', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      if (!j.ok) toast(j.error || '参数未生效', true);
+    } catch (e) { toast('参数发送失败', true); }
+  }
+
+  function syncParams(st) {
+    const adjust = (st.adjust || {});
+    adjust.ref_speed = st.ref_speed;
+    for (const spec of paramState.specs) {
+      const v = adjust[spec.name];
+      if (v === undefined || v === null) continue;
+      const label = $('pv-' + spec.name);
+      if (label) label.textContent = Number(v).toFixed(2);
+      const input = $('ps-' + spec.name);
+      // do not fight the user while a slider is being dragged
+      if (input && paramState.dragging !== spec.name) input.value = v;
+    }
+  }
+
+  const resetBtn = $('btn-reset-params');
+  if (resetBtn) resetBtn.onclick = async () => {
+    try {
+      await fetch('/api/params', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reset: true }) });
+      toast('已恢复默认参数');
+    } catch (e) { toast('恢复失败', true); }
+  };
 
   // scale bar
   setInterval(() => {

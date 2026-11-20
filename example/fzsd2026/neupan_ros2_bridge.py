@@ -38,6 +38,8 @@ Published
 
 Subscribed (control)
     /neupan_cancel                std_msgs/Empty   stop and clear the goal (web "stop")
+    /neupan_set_params            std_msgs/String  live-tune q_s/p_u/eta/d_max/d_min/ref_speed
+                                                   (JSON, {"reset": true} restores the yaml)
 
 Run it with::
 
@@ -51,6 +53,8 @@ import math
 import os
 import sys
 import time
+
+import yaml
 from collections import deque
 
 import numpy as np
@@ -126,6 +130,14 @@ def decode_xyz(msg: PointCloud2):
     return xyz[finite]
 
 
+def _path_length(path) -> float:
+    """Planar length of a list of [x, y, ...] waypoints."""
+    total = 0.0
+    for a, b in zip(path[:-1], path[1:]):
+        total += math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1]))
+    return total
+
+
 def scalar(value) -> float:
     """float() for tensors (without the requires_grad warning) and plain numbers."""
     if hasattr(value, 'item'):
@@ -179,13 +191,19 @@ class NeuPANBridge(Node):
 
         # local occupancy grid used to plan the reference path (A* on live lidar)
         self.declare_parameter('use_local_grid', True)   # rolling grid (clearance/detours)
-        self.declare_parameter('use_local_planner', False)  # A* reference path on that grid
+        self.declare_parameter('use_local_planner', True)  # A* reference path on that grid
         self.declare_parameter('local_grid_size', [40.0, 40.0])
         self.declare_parameter('local_grid_resolution', 0.1)
         self.declare_parameter('local_grid_decay', 6.0)
-        self.declare_parameter('local_inflation', 0.5)
+        self.declare_parameter('local_inflation', 0.45)
         self.declare_parameter('local_lookahead', 4.0)
-        self.declare_parameter('replan_interval', 1.0)
+        self.declare_parameter('replan_interval', 0.8)
+        self.declare_parameter('max_path_deviation', 2.0)   # re-anchor further off the path
+        self.declare_parameter('max_recoveries', 8)
+        self.declare_parameter('reverse_speed', 0.40)        # back-out speed [m/s]
+        self.declare_parameter('speed_adapt', True)          # slow down near obstacles
+        self.declare_parameter('min_ref_speed', 0.45)
+        self.declare_parameter('slowdown_distance', 1.2)
 
         # stuck detection / recovery
         self.declare_parameter('use_startup_waypoints', True)
@@ -233,6 +251,21 @@ class NeuPANBridge(Node):
         # ----------------------------- planner -------------------------------- #
         self.get_logger().info(f'loading NeuPAN config: {planner_config}')
         self.planner = neupan.init_from_yaml(planner_config)
+        self.adjust_names = ('q_s', 'p_u', 'eta', 'd_max', 'd_min')
+        self.adjust_defaults = {}
+        self.adjust_current = {}
+        self.ref_speed_default = float(self.planner.ref_speed)
+        try:
+            with open(planner_config, 'r') as f:
+                raw_cfg = yaml.safe_load(f) or {}
+            adjust_cfg = raw_cfg.get('adjust') or {}
+            for name in self.adjust_names:
+                if name in adjust_cfg:
+                    self.adjust_defaults[name] = float(adjust_cfg[name])
+                    self.adjust_current[name] = float(adjust_cfg[name])
+        except (OSError, ValueError, TypeError) as exc:  # pragma: no cover
+            self.get_logger().warn(f'cannot read the adjust defaults: {exc}')
+
         self.omni = self.planner.robot.kinematics == 'omni'
         self.box_length = float(getattr(self.planner.robot, 'length', 0.6) or 0.6)
         self.box_width = float(getattr(self.planner.robot, 'width', 0.5) or 0.5)
@@ -274,6 +307,12 @@ class NeuPANBridge(Node):
         self.replan_interval = float(self.get_parameter('replan_interval').value)
         self.use_startup_waypoints = bool(self.get_parameter('use_startup_waypoints').value)
         self.goal_tolerance = float(self.get_parameter('goal_tolerance').value)
+        self.max_path_deviation = float(self.get_parameter('max_path_deviation').value)
+        self.max_recoveries = int(self.get_parameter('max_recoveries').value)
+        self.reverse_speed = float(self.get_parameter('reverse_speed').value)
+        self.speed_adapt = bool(self.get_parameter('speed_adapt').value)
+        self.min_ref_speed = float(self.get_parameter('min_ref_speed').value)
+        self.slowdown_distance = float(self.get_parameter('slowdown_distance').value)
         self.stuck_time = float(self.get_parameter('stuck_time').value)
         self.stuck_distance = float(self.get_parameter('stuck_distance').value)
         if self.use_local_grid and LocalGrid is None:
@@ -291,6 +330,11 @@ class NeuPANBridge(Node):
         self._last_action = (0.0, 0.0)
         self._lidar_height_est = None
         self._pose_history = deque()
+        self._cmd_history = deque()
+        self._recoveries = 0
+        self._escape = None
+        self.base_ref_speed = float(getattr(self.planner, 'ref_speed', 1.5))
+        self._current_ref_speed = self.base_ref_speed
         self._last_replan = 0.0
         self._last_stuck_check = 0.0
         self._stuck_since = None
@@ -337,6 +381,7 @@ class NeuPANBridge(Node):
 
         self.status_pub = self.create_publisher(String, '/neupan_status', 10)
         self.create_subscription(Empty, '/neupan_cancel', self.cancel_callback, 10)
+        self.create_subscription(String, '/neupan_set_params', self.set_params_callback, 10)
 
         if self.publish_tf:
             self.tf_broadcaster = TransformBroadcaster(self)
@@ -449,6 +494,44 @@ class NeuPANBridge(Node):
         self._publish_stop()
         self.get_logger().info('cancelled: goal cleared, robot stopped')
 
+    def set_params_callback(self, msg: String):
+        """Live tuning from the web UI: {"q_s": 4, ...} or {"reset": true}."""
+        try:
+            payload = json.loads(msg.data)
+        except ValueError:
+            self.get_logger().warn('invalid /neupan_set_params payload (expected JSON)')
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get('reset'):
+            self._apply_params(dict(self.adjust_defaults), ref_speed=self.ref_speed_default)
+            return
+        values = {}
+        for name in self.adjust_names:
+            if name in payload:
+                try:
+                    values[name] = float(payload[name])
+                except (TypeError, ValueError):
+                    continue
+        ref_speed = payload.get('ref_speed')
+        self._apply_params(values, ref_speed=float(ref_speed) if ref_speed is not None else None)
+
+    def _apply_params(self, values, ref_speed=None):
+        if values:
+            try:
+                self.planner.update_adjust_parameters(**values)
+                self.adjust_current.update(values)
+            except Exception as exc:  # pragma: no cover - cvxpy/torch guard
+                self.get_logger().warn(f'cannot update {list(values)}: {exc}')
+        if ref_speed is not None:
+            self.base_ref_speed = max(0.1, float(ref_speed))
+            self.planner.set_reference_speed(self.base_ref_speed)
+            self._current_ref_speed = self.base_ref_speed
+        shown = ', '.join(f'{k}={v:g}' for k, v in sorted(self.adjust_current.items()))
+        speed = '' if ref_speed is None else f', ref_speed={self.base_ref_speed:g}'
+        self._last_event = f'params updated: {shown}{speed}'
+        self.get_logger().info(f'planner parameters: {shown}{speed}')
+
     def initial_path_callback(self, msg: Path):
         if len(msg.poses) < 2:
             return
@@ -470,6 +553,8 @@ class NeuPANBridge(Node):
         self._got_goal = True
         self.failed = False
         self._detour_attempts = 0
+        self._recoveries = 0
+        self._escape = None
         self._reference_goal = goal.copy()
         self._last_event = f'new goal ({goal[0, 0]:.2f}, {goal[1, 0]:.2f})'
         self.get_logger().info(
@@ -477,36 +562,89 @@ class NeuPANBridge(Node):
         self._update_reference_path(reason='new goal', force=True)
         self.planner.reset()
 
-    def _local_plan(self, start_xy, goal_xy):
-        """Plan a short feasible reference segment towards ``goal_xy``.
+    # ------------------------------------------------------------------ #
+    # Reference path: the "global" constraint, planned on the rolling grid
+    # ------------------------------------------------------------------ #
+    def _carrot_candidates(self, start_xy, goal_xy):
+        """Targets the local A* may aim at: the goal itself when close, else carrots."""
+        dx = goal_xy[0] - start_xy[0]
+        dy = goal_xy[1] - start_xy[1]
+        distance = math.hypot(dx, dy)
+        if distance < 1e-3:
+            return []
+        bearing = math.atan2(dy, dx)
+        if distance <= self.local_lookahead:
+            return [(goal_xy, 0.0)]
+        reach = self.local_lookahead
+        out = []
+        for offset in (0.0, 0.26, -0.26, 0.52, -0.52, 0.79, -0.79, 1.05, -1.05,
+                       1.31, -1.31, 1.57, -1.57, 1.83, -1.83, 2.09, -2.09, 2.62, -2.62):
+            out.append(((start_xy[0] + reach * math.cos(bearing + offset),
+                         start_xy[1] + reach * math.sin(bearing + offset)), offset))
+        return out
 
-        A full A* towards a far goal can pick arbitrarily large detours through
-        unobserved space, so the local planner only looks ``local_lookahead`` metres
-        ahead: it puts a carrot on the goal bearing and searches around it (like a
-        gap search) for the closest direction that is actually free.  The result is a
-        short path that NeuPAN can track; it is refreshed while the robot drives.
+    def _local_plan(self, start_xy, goal_xy):
+        """A* reference towards the goal on the rolling occupancy grid.
+
+        The grid is inflated by ``local_inflation`` (robot radius + margin), so gaps
+        narrower than the robot are *not* traversable for the planner: that is the
+        global constraint that stops the robot from trying to squeeze between two
+        boards.  Only ``local_lookahead`` metres are planned ahead - long plans through
+        unobserved space can pick absurd detours - and the carrot is rotated when the
+        direct bearing is blocked, which yields a feasible corridor around wide
+        obstacles instead of a path through them.
         """
         if self.local_grid is None:
             return None
-        dx, dy = goal_xy[0] - start_xy[0], goal_xy[1] - start_xy[1]
+        dx = goal_xy[0] - start_xy[0]
+        dy = goal_xy[1] - start_xy[1]
         distance = math.hypot(dx, dy)
-        if distance < 1e-3:
-            return [list(start_xy) + [0.0]]
-        bearing = math.atan2(dy, dx)
-        lookahead = min(self.local_lookahead, distance)
-        final_segment = distance <= self.local_lookahead
 
-        for offset in (0.0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, 1.4, -1.4,
-                       1.75, -1.75, 2.1, -2.1, 2.45, -2.45, 2.8, -2.8):
-            if final_segment and offset != 0.0:
-                continue
-            target = (start_xy[0] + lookahead * math.cos(bearing + offset),
-                      start_xy[1] + lookahead * math.sin(bearing + offset)) \
-                if not final_segment else goal_xy
+        # Prefer one stable plan to the goal: replanning short carrots every second
+        # makes the reference jitter and the robot zig-zags.  A plan is accepted when
+        # it is not an absurd detour through unobserved space.
+        path = self.local_grid.plan(start_xy, goal_xy, self.local_inflation)
+        if path:
+            length = _path_length(path)
+            if length <= max(2.0 * distance + 2.0, distance + 4.0):
+                return self._smooth_path(path)
+
+        # Fallback: a short carrot on (or around) the direct bearing
+        for target, _offset in self._carrot_candidates(start_xy, goal_xy):
             path = self.local_grid.plan(start_xy, target, self.local_inflation)
             if path:
-                return path
+                return self._smooth_path(path)
         return None
+
+    def _smooth_path(self, path, iterations=2, spacing=0.35):
+        """Chaikin-smooth and decimate an A* polyline so NeuPAN tracks a calm reference."""
+        pts = np.array([[float(p[0]), float(p[1])] for p in path], dtype=float)
+        if len(pts) < 3:
+            return path
+        for _ in range(iterations):
+            new_pts = [pts[0]]
+            for a, b in zip(pts[:-1], pts[1:]):
+                new_pts.append(0.75 * a + 0.25 * b)
+                new_pts.append(0.25 * a + 0.75 * b)
+            new_pts.append(pts[-1])
+            pts = np.array(new_pts)
+        kept = [pts[0]]
+        for p in pts[1:-1]:
+            if np.linalg.norm(p - kept[-1]) >= spacing:
+                kept.append(p)
+        if np.linalg.norm(pts[-1] - kept[-1]) > 1e-3:
+            kept.append(pts[-1])
+        out = []
+        for i, p in enumerate(kept):
+            if i < len(kept) - 1:
+                nxt = kept[i + 1]
+                yaw = math.atan2(float(nxt[1] - p[1]), float(nxt[0] - p[0]))
+            elif out:
+                yaw = out[-1][2]
+            else:
+                yaw = 0.0
+            out.append([float(p[0]), float(p[1]), yaw])
+        return out
 
     def _build_waypoints(self, goal: np.ndarray):
         """Return (waypoints, source) for the reference path towards ``goal``."""
@@ -527,11 +665,8 @@ class NeuPANBridge(Node):
 
         if path:
             waypoints = [np.array([[x], [y], [yaw]]).reshape(3, 1) for x, y, yaw in path]
-            # the last waypoint of a local plan is a carrot, not the goal
-            if source == 'local A*' and math.hypot(
-                    waypoints[-1][0, 0] - goal_xy[0],
-                    waypoints[-1][1, 0] - goal_xy[1]) > 0.05:
-                pass
+            # a local plan ends on a carrot: do NOT jump straight to the goal from
+            # there, the segment to the goal is replanned when the carrot is reached
             return waypoints, source
         return None, source
 
@@ -547,14 +682,14 @@ class NeuPANBridge(Node):
         goal = self.goal
         waypoints, source = self._build_waypoints(goal)
         if waypoints is None:
-            if force:
+            if force and self.global_planner is None:
                 self.planner.update_initial_path_from_goal(self.robot_state, goal)
                 self.get_logger().info(
-                    f'no A* path found ({reason}); using a straight reference path')
-            else:
-                self.get_logger().warn(
-                    f'no A* path found ({reason}); keeping the current reference path',
-                    throttle_duration_sec=2.0)
+                    f'no A* path ({reason}); using a straight reference path')
+                return True
+            self.get_logger().warn(
+                f'no A* path found ({reason}); keeping the current reference path',
+                throttle_duration_sec=2.0)
             return False
 
         self.planner.update_initial_path_from_waypoints(waypoints)
@@ -572,122 +707,141 @@ class NeuPANBridge(Node):
             return False
         path = self.planner.initial_path
         start_idx = getattr(self.planner.ipath, 'point_index', 0)
-        # only look a few metres ahead: near points are handled by NeuPAN itself
+        # a slightly smaller inflation here: the path may legitimately hug an obstacle
+        inflation = max(0.2, self.local_inflation * 0.75)
         for pt in path[start_idx:start_idx + 80]:
             if math.hypot(pt[0, 0] - self.robot_state[0, 0],
-                          pt[1, 0] - self.robot_state[1, 0]) > 6.0:
+                          pt[1, 0] - self.robot_state[1, 0]) > 5.0:
                 break
-            if not self.local_grid.is_free((float(pt[0, 0]), float(pt[1, 0])),
-                                           self.local_inflation):
+            if not self.local_grid.is_free((float(pt[0, 0]), float(pt[1, 0])), inflation):
                 return True
         return False
 
-    def _check_stuck(self, now):
-        """Detect "commanded to move but not moving" and replan around the blockage."""
+    def _path_deviation(self):
+        """Distance from the robot to the current reference path [m]."""
+        path = self.planner.initial_path
+        if path is None or self.robot_state is None:
+            return 0.0
+        x, y = float(self.robot_state[0, 0]), float(self.robot_state[1, 0])
+        best = float('inf')
+        for pt in path[::2]:
+            d = math.hypot(float(pt[0, 0]) - x, float(pt[1, 0]) - y)
+            if d < best:
+                best = d
+        return best
+
+    # ------------------------------------------------------------------ #
+    # Progress monitoring and recovery
+    # ------------------------------------------------------------------ #
+    def _is_oscillating(self, now):
+        """True when the command keeps flipping direction without moving."""
+        while self._cmd_history and (now - self._cmd_history[0][0]) > 1.5:
+            self._cmd_history.popleft()
+        hist = list(self._cmd_history)
+        if len(hist) < 6:
+            return False
+        reversals = 0
+        prev = None
+        for _t, vx, vy in hist:
+            norm = math.hypot(vx, vy)
+            if norm < 0.2:
+                prev = None
+                continue
+            cur = (vx / norm, vy / norm)
+            if prev is not None and (cur[0] * prev[0] + cur[1] * prev[1]) < -0.3:
+                reversals += 1
+            prev = cur
+        return reversals >= 4
+
+    def _check_progress(self, now):
+        """Detect a wedged/oscillating robot and trigger a recovery."""
         if len(self._pose_history) < 2:
             return
         while self._pose_history and (now - self._pose_history[0][0]) > self.stuck_time:
             self._pose_history.popleft()
-        if not self._pose_history or (now - self._last_stuck_check) < 0.2:
+        if len(self._pose_history) < 2 or (now - self._last_stuck_check) < 0.2:
             return
         self._last_stuck_check = now
         commanded = math.hypot(*self._last_action)
         oldest = self._pose_history[0]
         moved = math.hypot(self.robot_state[0, 0] - oldest[1],
                            self.robot_state[1, 0] - oldest[2])
-        if commanded > 0.25 and moved < self.stuck_distance:
+        oscillating = self._is_oscillating(now)
+        if commanded > 0.2 and (moved < self.stuck_distance or oscillating):
             if self._stuck_since is None:
                 self._stuck_since = now
             elif (now - self._stuck_since) > self.stuck_time:
-                self.get_logger().warn(
-                    f'robot is blocked (commanded {commanded:.2f} m/s, moved {moved:.3f} m '
-                    f'in {self.stuck_time:.1f} s)')
                 self._stuck_since = None
-                if not self._try_detour():
-                    self.failed = True
-                    self._last_event = 'blocked: no way around, stopped'
-                    self.get_logger().warn(
-                        'no way around the blockage left; stopping (send a new goal to '
-                        'retry)', throttle_duration_sec=2.0)
-                    self._publish_stop()
+                kind = 'wedged' if moved < 0.02 else ('oscillating' if oscillating else 'blocked')
+                self.get_logger().warn(
+                    f'no progress ({kind}): commanded {commanded:.2f} m/s, moved '
+                    f'{moved:.3f} m, deviation {self._path_deviation():.2f} m')
+                self._recover(kind)
         else:
             self._stuck_since = None
 
-    def _side_score(self, start_xy, target_xy):
-        """Mean obstacle clearance along a segment (1.0 when there is no local map)."""
-        if self.local_grid is None:
-            return 1.0
-        clearance = self._clearance()
-        dx, dy = target_xy[0] - start_xy[0], target_xy[1] - start_xy[1]
-        dist = math.hypot(dx, dy)
-        if dist < 1e-3:
-            return 1.0
-        steps = max(4, int(dist / self.local_grid.resolution))
-        total = 0.0
-        for i in range(steps + 1):
-            t = i / steps
-            gx, gy = self.local_grid.world_to_grid(
-                (start_xy[0] + t * dx, start_xy[1] + t * dy))
-            if not self.local_grid.in_bounds(gx, gy):
-                total += 0.0
-                continue
-            total += float(clearance[gy, gx])
-        return total / (steps + 1)
+    def _recover(self, kind):
+        """Replan with clearance; back out of the slot when the robot is pinned."""
+        self._recoveries += 1
+        if self._recoveries > self.max_recoveries:
+            self.failed = True
+            self._last_event = f'stuck ({kind}): giving up after {self.max_recoveries} tries'
+            self.get_logger().warn(
+                'cannot get around the obstacle; stopping (send a new goal to retry)',
+                throttle_duration_sec=2.0)
+            self._publish_stop()
+            return
 
-    def _clearance(self):
-        if getattr(self, '_clearance_cache', None) is None or \
-                (time.time() - self._clearance_cache[1]) > 0.5:
-            self._clearance_cache = (self.local_grid.clearance(), time.time())
-        return self._clearance_cache[0]
+        deviation = self._path_deviation()
+        try_reverse = kind == 'wedged' or (self._recoveries % 2 == 0)
+        if try_reverse and self._start_reverse_escape():
+            self._last_event = f'reversing out ({kind}, try {self._recoveries})'
+            return
+        if self._update_reference_path(reason=f'recover/{kind}', force=True):
+            self._last_event = f'replanned around the obstacle ({kind})'
+        elif self._try_detour():
+            self._last_event = f'lateral detour ({kind})'
+        elif deviation > self.max_path_deviation:
+            self.planner.update_initial_path_from_goal(self.robot_state, self.goal)
+            self.planner.reset()
+            self._last_event = f'reference re-anchored ({kind})'
+        else:
+            self._last_event = f'no path around the obstacle ({kind})'
 
-    def _try_detour(self):
-        """Escape a blockage by inserting a lateral intermediate waypoint.
-
-        NeuPAN only tracks the reference path, so when the direct path is physically
-        blocked the cheapest robust fix is to bend the reference sideways.  The side
-        is chosen with the rolling occupancy grid (more free cells wins) and the
-        lateral offset grows with every attempt.  Gives up after ``max_detours``.
-        """
-        if self.goal is None:
+    def _start_reverse_escape(self):
+        """Back out of a narrow slot for a moment (NeuPAN cannot un-wedge a robot)."""
+        if self.goal is None or self.robot_state is None:
             return False
-        if self._detour_attempts >= self.max_detours:
-            return False
-        start = (float(self.robot_state[0, 0]), float(self.robot_state[1, 0]))
-        goal = (float(self.goal[0, 0]), float(self.goal[1, 0]))
-        dx, dy = goal[0] - start[0], goal[1] - start[1]
-        distance = math.hypot(dx, dy)
-        if distance < 0.6:
-            return False
-        ux, uy = dx / distance, dy / distance
-        reach = min(3.0, 0.6 * distance)
-        mid = (start[0] + ux * reach, start[1] + uy * reach)
-        self._detour_attempts += 1
-        lateral = self.detour_step * self._detour_attempts
-
-        best = None
-        for side in (1.0, -1.0):
-            target = (mid[0] - uy * lateral * side, mid[1] + ux * lateral * side)
-            score = self._side_score(start, target)
-            if best is None or score > best[0]:
-                best = (score, target, side)
-        score, target, side = best
-
-        waypoints = [
-            np.array([[start[0]], [start[1]], [self.robot_state[2, 0]]]).reshape(3, 1),
-            np.array([[target[0]], [target[1]], [0.0]]).reshape(3, 1),
-            self.goal.copy(),
-        ]
-        self.planner.update_initial_path_from_waypoints(waypoints)
-        self.planner.reset()
-        self.arrived = False
-        if self.vis:
-            self._publish_path(self.global_path_pub, waypoints)
-        self._last_event = (f'detour #{self._detour_attempts}: '
-                            f'{"left" if side > 0 else "right"} {lateral:.1f} m')
+        yaw = float(self.robot_state[2, 0])
+        x, y = float(self.robot_state[0, 0]), float(self.robot_state[1, 0])
+        distance = min(1.2, 0.55 + 0.2 * self._recoveries)
+        if self.local_grid is not None:
+            behind = (x - 0.4 * math.cos(yaw), y - 0.4 * math.sin(yaw))
+            if not self.local_grid.is_free(behind, max(0.2, self.local_inflation * 0.5)):
+                return False       # nothing to back into
+        duration = max(0.45, distance / max(self.reverse_speed, 0.1))
+        self._escape = {'until': time.time() + duration, 'vx': -self.reverse_speed, 'vy': 0.0}
+        self.planner.set_reference_speed(self.min_ref_speed)
+        self._current_ref_speed = self.min_ref_speed
         self.get_logger().info(
-            f'detour #{self._detour_attempts}: lateral {lateral:.1f} m to the '
-            f'{"left" if side > 0 else "right"} (clearance score {score:.2f})')
+            f'reverse escape: backing out {distance:.2f} m at {self.reverse_speed:.2f} m/s')
         return True
+
+    def _adapt_speed(self):
+        """Slow the reference down when the robot gets close to an obstacle."""
+        if not self.speed_adapt or self.base_ref_speed <= 0:
+            return
+        md = scalar(self.planner.min_distance)
+        if not math.isfinite(md):
+            target = self.base_ref_speed
+        elif md >= self.slowdown_distance:
+            target = self.base_ref_speed
+        else:
+            target = max(self.min_ref_speed,
+                         self.base_ref_speed * max(0.0, md) / self.slowdown_distance)
+        if abs(target - self._current_ref_speed) > 0.05:
+            self.planner.set_reference_speed(target)
+            self._current_ref_speed = target
 
     # ------------------------------------------------------------------ #
     # Sensor processing
@@ -808,6 +962,8 @@ class NeuPANBridge(Node):
             return 'idle' if self.goal is None else 'arrived'
         if self.planner.initial_path is None:
             return 'waiting for goal'
+        if self._escape:
+            return 'reversing'
         return 'driving'
 
     def _status_dict(self):
@@ -835,6 +991,11 @@ class NeuPANBridge(Node):
             'z_robot': self.z_robot,
             'max_linear': self.max_linear,
             'kinematics': 'omni' if self.omni else 'diff',
+            'adjust': {k: round(float(v), 3) for k, v in self.adjust_current.items()},
+            'adjust_defaults': {k: round(float(v), 3)
+                                for k, v in self.adjust_defaults.items()},
+            'ref_speed': round(float(self.base_ref_speed), 2),
+            'ref_speed_default': round(float(self.ref_speed_default), 2),
         }
 
     def publish_status(self):
@@ -873,6 +1034,17 @@ class NeuPANBridge(Node):
         self._broadcast_robot_tf()
         self._publish_goal()
 
+        if self._escape:
+            if time.time() < self._escape['until']:
+                # open-loop back-out: NeuPAN cannot help while the robot is wedged
+                self._publish_action(np.array([[self._escape['vx']], [self._escape['vy']]]))
+                self._broadcast_robot_tf()
+                return
+            self._escape = None
+            self._update_reference_path(reason='after reverse', force=True)
+            self._publish_stop()
+            return
+
         if self.arrived or self.failed:
             self._publish_stop()
             if self._due('_viz_at', self.viz_rate):
@@ -884,7 +1056,8 @@ class NeuPANBridge(Node):
             self._publish_obstacles()
 
         now_ts = time.time()
-        self._check_stuck(now_ts)
+        self._adapt_speed()
+        self._check_progress(now_ts)
         if (self.use_local_planner and self._stuck_since is None
                 and self._reference_blocked()):
             self._update_reference_path(reason='path blocked')
@@ -944,6 +1117,8 @@ class NeuPANBridge(Node):
                 f'v=({self._last_action[0]:.2f}, {self._last_action[1]:.2f})')
 
     def _publish_action(self, action: np.ndarray):
+        self._cmd_history.append((time.time(), float(action[0, 0]),
+                                  float(action[1, 0]) if action.shape[0] > 1 else 0.0))
         cmd = ChassisCmd()
         cmd.type = ChassisCmd.VELOCITY
         if self.omni:
