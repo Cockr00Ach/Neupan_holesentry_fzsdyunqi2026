@@ -193,6 +193,15 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
    的原点/尺度不覆盖 Gazebo 世界坐标（实测 A* 从出生点到场地中部常无解），
    所以 `use_global_planner` 默认关闭；等拿到与仿真世界一致的静态地图（或用 nav2 的
    SLAM/定位建图）再打开，并把 `map` 与 `odom` 的固定变换交给定位模块。
+   本目录提供了 `build_map_from_lidar.py`，用运行中的仿真扫描出一张 map_server 地图：
+   ```bash
+   ./run_sim.sh --wait &                                  # 桥接节点发布 /neupan_obstacles
+   python3 build_map_from_lidar.py --output map/rmul_2025_sim
+   ```
+   它会在 5 个位姿上瞬移机器人并累积障碍点。**注意**：激光点在 0.05 m 分辨率下较稀疏，
+   且会看到场地外部的结构，目前这类扫描图直接做 A* 仍可能找不到路径（工具默认会做
+   0.15 m 膨胀，可用 `--dilate/--poses/--settle` 调），因此它只是给 A* 提供路网的起点，
+   默认的“直连参考路径 + 卡死绕行”不依赖静态地图。
 3. **本仿真的里程计就是世界坐标**：`/red_standard_robot1/chassis_odometry_gt` 的 x/y 与
    Gazebo 世界坐标一致（`z` 恒为 0），所以桥接把 `map→odom` 发布成单位变换。
    实车上若 `odom` 以开机点为原点，请让定位节点发布 `map→odom`，并把
@@ -223,6 +232,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 | `planner.yaml` | NeuPAN 配置（3D 盒模型、DUNE 权重、代价参数） |
 | `env.yaml` / `run_demo*.py` | irsim 演示 |
 | `global_planner.py` | 静态地图 A*（可选） |
+| `build_map_from_lidar.py` | 用运行中的仿真扫描出 map_server 地图（实验性） |
 | `local_grid.py` | 滚动占据栅格 + A*（卡死绕行方向评估 / 实验参考路径） |
 | `run_sim.sh` / `stop_sim.sh` | 一键启动 / 关闭 |
 | `check_all.sh` | 三个验收场景一键复跑 |
