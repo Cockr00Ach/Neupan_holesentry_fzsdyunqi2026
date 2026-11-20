@@ -143,6 +143,7 @@
 
 <footer>
   <span id="link" class="bad">● 未连接</span>
+  <span id="age">数据 --</span>
   <span id="fps">-- fps</span>
   <span id="cursor">x -- , y --</span>
   <span id="goal">目标 --</span>
@@ -449,12 +450,44 @@
   }
 
   // ------------------------------------------------------------------ SSE
-  const es = new EventSource('/api/stream');
-  es.onopen = () => { $('link').className = 'good'; $('link').textContent = '● 已连接'; };
-  es.onerror = () => { $('link').className = 'bad'; $('link').textContent = '● 断开，重连中'; };
-  es.onmessage = (ev) => {
-    try { applyData(JSON.parse(ev.data)); } catch (e) { /* ignore malformed frame */ }
-  };
+  // Browsers can silently drop a long-lived SSE stream (server restart, tab in the
+  // background). A watchdog reconnects when no frame arrived for a few seconds.
+  const WATCHDOG_MS = 4000;
+  let es = null;
+  let lastMsg = 0;
+  let reconnecting = false;
+
+  function connect() {
+    if (es) { try { es.close(); } catch (e) { /* ignore */ } }
+    es = new EventSource('/api/stream');
+    es.onopen = () => {
+      reconnecting = false;
+      $('link').className = 'good';
+      $('link').textContent = '● 已连接';
+    };
+    es.onerror = () => {
+      $('link').className = 'bad';
+      $('link').textContent = '● 断开，重连中';
+      if (!reconnecting) { reconnecting = true; setTimeout(connect, 1500); }
+    };
+    es.onmessage = (ev) => {
+      lastMsg = Date.now();
+      try { applyData(JSON.parse(ev.data)); } catch (e) { /* ignore malformed frame */ }
+    };
+  }
+  connect();
+  setInterval(() => {
+    if (!lastMsg) return;
+    const age = (Date.now() - lastMsg) / 1000;
+    const el = $('age');
+    if (el) el.textContent = `数据 ${age.toFixed(1)} s 前`;
+    if (age > WATCHDOG_MS / 1000) {
+      $('link').className = 'bad';
+      $('link').textContent = '● 数据超时，重连中';
+      connect();
+      lastMsg = Date.now();   // avoid a reconnect storm while it settles
+    }
+  }, 1000);
 
   let firstFrame = true;
   function applyData(d) {
