@@ -98,6 +98,16 @@ def quat_to_yaw(q: Quaternion) -> float:
                       1.0 - 2.0 * (q.z * q.z + q.y * q.y))
 
 
+def scalar(value) -> float:
+    """float() for tensors (without the requires_grad warning) and plain numbers."""
+    if hasattr(value, 'item'):
+        try:
+            return float(value.item())
+        except (ValueError, RuntimeError):
+            pass
+    return float(value)
+
+
 def resolve_path(path: str, base_dir: str) -> str:
     """Resolve ``path`` against the cwd, then against ``base_dir``."""
     if os.path.isabs(path) or not path:
@@ -798,7 +808,7 @@ class NeuPANBridge(Node):
                 self._publish_action(action)
         elif info['stop']:
             self.get_logger().warn(
-                f'stop: min_dist={float(self.planner.min_distance):.3f} < '
+                f'stop: min_dist={scalar(self.planner.min_distance):.3f} < '
                 f'threshold={self.planner.collision_threshold:.3f}',
                 throttle_duration_sec=1.0)
             self._publish_stop()
@@ -826,7 +836,7 @@ class NeuPANBridge(Node):
             self.get_logger().info(
                 f'pose=({self.robot_state[0, 0]:.2f}, {self.robot_state[1, 0]:.2f}, '
                 f'{self.robot_state[2, 0]:.2f}) '
-                f'min_dist={float(self.planner.min_distance):.3f} '
+                f'min_dist={scalar(self.planner.min_distance):.3f} '
                 f'points={0 if self.obstacle_points is None else self.obstacle_points.shape[1]} '
                 f'lidar_h={self.lidar_height:.2f} '
                 f'v=({self._last_action[0]:.2f}, {self._last_action[1]:.2f})')
