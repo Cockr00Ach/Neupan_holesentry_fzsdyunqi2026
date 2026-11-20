@@ -25,6 +25,7 @@ from neupan.blocks import ObsPointNet, DUNETrain
 from neupan.configuration import np_to_tensor, to_device
 from neupan.util import time_it, file_check, repeat_mk_dirs
 from typing import Optional
+import os
 import sys
 class DUNE(torch.nn.Module):
 
@@ -174,8 +175,23 @@ class DUNE(torch.nn.Module):
 
         model_name = train_kwargs.get("model_name", self.robot.name)
 
-        checkpoint_path = sys.path[0] + '/model' + '/' + model_name
-        checkpoint_path = repeat_mk_dirs(checkpoint_path)
+        # An explicit ``model_path`` wins (resolved against the working directory);
+        # otherwise keep the historical ``<script dir>/model/<model_name>`` layout.
+        model_path = train_kwargs.get("model_path")
+        resume_checkpoint = train_kwargs.get("resume_checkpoint")
+        if model_path:
+            checkpoint_path = os.path.abspath(os.path.expanduser(model_path))
+            checkpoint_path = repeat_mk_dirs(checkpoint_path)
+        elif resume_checkpoint:
+            # continue in the directory of the checkpoint (reuse it, do not create a
+            # new <path>_1 directory, otherwise the resumed run loses its checkpoints)
+            checkpoint_path = os.path.dirname(os.path.abspath(resume_checkpoint))
+            os.makedirs(checkpoint_path, exist_ok=True)
+            checkpoint_path = os.path.abspath(checkpoint_path)
+        else:
+            base = sys.path[0] if sys.path and sys.path[0] else os.getcwd()
+            checkpoint_path = os.path.join(base, 'model', model_name)
+            checkpoint_path = repeat_mk_dirs(checkpoint_path)
         
         self.train_model = DUNETrain(self.model, self.G, self.h, checkpoint_path)
         self.full_model_name = self.train_model.start(**train_kwargs)

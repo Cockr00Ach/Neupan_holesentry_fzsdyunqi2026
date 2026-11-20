@@ -98,6 +98,14 @@ class neupan(torch.nn.Module):
         # Resolve a relative DUNE checkpoint against the config file directory when it
         # does not exist relative to the current working directory. This keeps the
         # examples runnable from any directory, not only from the repository root.
+        train_config = config.get("train")
+        if isinstance(train_config, dict):
+            model_path = train_config.get("model_path")
+            if isinstance(model_path, str) and model_path:
+                if not os.path.isabs(model_path) and not os.path.exists(model_path):
+                    candidate = os.path.join(os.path.dirname(abs_path), model_path)
+                    train_config["model_path"] = candidate
+
         pan_config = config.get("pan")
         if isinstance(pan_config, dict):
             checkpoint = pan_config.get("dune_checkpoint")

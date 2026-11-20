@@ -171,7 +171,18 @@ cd src/NeuPAN
 PYTHONPATH=$(pwd) python3 example/fzsd2026/dune_train_fzsd2026.py
 ```
 
-脚本会自动找 `model/fzsd2026_sentry_3d/` 里最大 epoch 的 `model_*.pth` 续训。
+脚本会自动找 `model/fzsd2026_sentry_3d/` 里最大 epoch 的 `model_*.pth` 续训；
+续训会写到 checkpoint 所在目录（不会新建 `xxx_1` 目录），学习率按 `start_epoch`
+自动对齐。也可以显式指定输出目录（`train.model_path`，相对路径优先按当前目录解析，
+其次按配置文件目录解析），例如：
+
+```python
+planner.dune_train_kwargs.update(model_path='/tmp/dune_test', data_size=400,
+                                 epoch=4, save_freq=2, valid_freq=2)
+planner.train_dune()
+```
+
+已用一个 3 维数据的小规模训练 + 续训烟囱测试验证过（`(32, 3)` 输入层、`model_0/2/4.pth`）。
 
 ## 7. irsim 可视化演示（不依赖 ROS）
 
