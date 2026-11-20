@@ -91,7 +91,7 @@ class DUNETrain:
             mu >= 0
         """
         self.mu = cp.Variable((self.G.shape[0], 1), nonneg=True)
-        self.p = cp.Parameter((2, 1))  # points
+        self.p = cp.Parameter((self.G.shape[1], 1))  # points
 
         cost = self.mu.T @ (self.G.cpu() @ self.p - self.h.cpu())
         constraints = [cp.norm(self.G.cpu().T @ self.mu) <= 1]
@@ -106,20 +106,21 @@ class DUNETrain:
             value_to_tensor(distance_value),
         )
 
-    def generate_data_set(self, data_size=10000, data_range=[-50, -50, 50, 50]):
+    def generate_data_set(self, data_size=10000, data_range=[-50, -50, -50, 50, 50, 50]):
         """
         generate dataset for training
-        data_range: [low_x, low_y, high_x, high_y]
+        data_range: [low_x, low_y, low_z, high_x, high_y, high_z]
         """
 
         input_data = []
         label_data = []
         distance_data = []
 
+        state_dim = self.G.shape[1]
         rand_p = np.random.uniform(
-            low=data_range[:2], high=data_range[2:], size=(data_size, 2)
+            low=data_range[:state_dim], high=data_range[state_dim:], size=(data_size, state_dim)
         )
-        rand_p_list = [rand_p[i].reshape(2, 1) for i in range(data_size)]
+        rand_p_list = [rand_p[i].reshape(state_dim, 1) for i in range(data_size)]
 
         for p in rand_p_list:
             results = self.process_data(p)
@@ -142,7 +143,7 @@ class DUNETrain:
     def start(
         self,
         data_size: int = 100000,
-        data_range: list[int] = [-25, -25, 25, 25],
+        data_range: list[int] = [-25, -25, -25, 25, 25, 25],
         batch_size: int = 256,
         epoch: int = 5000,
         valid_freq: int = 100,
@@ -151,6 +152,8 @@ class DUNETrain:
         lr_decay: float = 0.5,
         decay_freq: int = 1500,
         save_loss: bool = False,
+        resume_checkpoint: str = None,
+        start_epoch: int = 0,
         **kwargs,
     ):
 
@@ -167,6 +170,8 @@ class DUNETrain:
             "robot_G": self.G,
             "robot_h": self.h,
             "model": self.model,
+            "resume_checkpoint": resume_checkpoint,
+            "start_epoch": start_epoch,
         }
 
         with open(self.checkpoint_path + "/train_dict.pkl", "wb") as f:
@@ -182,8 +187,27 @@ class DUNETrain:
                 file=f,
             )
 
-        self.optimizer.param_groups[0]["lr"] = float(lr)
+        # Align the learning-rate schedule with start_epoch so a resumed run
+        # continues at the same decay level a from-scratch run would be at.
+        initial_lr = float(lr) * (lr_decay ** (start_epoch // decay_freq))
+        self.optimizer.param_groups[0]["lr"] = initial_lr
         full_model_name = None
+
+        if resume_checkpoint:
+            print(
+                f"resume training from {resume_checkpoint}, "
+                f"start_epoch {start_epoch}, initial lr {initial_lr}"
+            )
+            self.model.load_state_dict(
+                torch.load(resume_checkpoint, map_location=torch.device("cpu"))
+            )
+            to_device(self.model)
+            with open(self.checkpoint_path + "/results.txt", "a") as f:
+                print(
+                    f"resume from {resume_checkpoint}, "
+                    f"start_epoch {start_epoch}, initial lr {initial_lr}\n",
+                    file=f,
+                )
 
         print("dataset generating start ...")
         dataset = self.generate_data_set(data_size, data_range)
@@ -197,9 +221,11 @@ class DUNETrain:
         print("dataset training start ...")
 
         with self.live:
-            task = self.progress.add_task("[cyan]Training...", total=epoch)
+            task = self.progress.add_task(
+                "[cyan]Training...", total=max(epoch - start_epoch, 1)
+            )
 
-            for i in range(epoch + 1):
+            for i in range(start_epoch, epoch + 1):
 
                 self.progress.update(task, advance=1)
                 self.live.refresh()
@@ -357,7 +383,12 @@ class DUNETrain:
         mu2T = torch.transpose(mu2, 1, 2)
 
         theta = np.random.uniform(0, 2 * np.pi)
-        R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        state_dim = self.G.shape[1]
+        if state_dim == 2:
+            R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        else:
+            c, s = np.cos(theta), np.sin(theta)
+            R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
         R = np_to_tensor(R)
 
         fa = torch.transpose(-R @ self.G.T @ mu1, 1, 2)

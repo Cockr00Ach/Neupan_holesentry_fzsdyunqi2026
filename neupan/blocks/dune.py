@@ -47,7 +47,7 @@ class DUNE(torch.nn.Module):
         self.edge_dim = self.G.shape[0]
         self.state_dim = self.G.shape[1]
 
-        self.model = to_device(ObsPointNet(2, self.edge_dim))
+        self.model = to_device(ObsPointNet(self.state_dim, self.edge_dim))
         self.load_model(checkpoint, train_kwargs)
 
         self.obstacle_points = None

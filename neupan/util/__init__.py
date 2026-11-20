@@ -157,6 +157,62 @@ def get_transform(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return trans, rot
 
 
+def get_transform_3d(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Get 3D rotation (around z) and translation from a 2D planar state.
+
+    Args:
+        state (np.array): State [x, y, theta] (3x1) or [x, y] (2x1).
+
+    Returns:
+        tuple: Translation vector (3x1) and rotation matrix (3x3) around z.
+    """
+    if state.shape == (2, 1):
+        theta = 0.0
+        trans = np.vstack([state, np.zeros((1, 1))])
+    else:
+        theta = state[2, 0]
+        trans = np.vstack([state[0:2], np.zeros((1, 1))])
+
+    c, s = cos(theta), sin(theta)
+    rot = np.array(
+        [
+            [c, -s, 0.0],
+            [s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    return trans, rot
+
+
+def gen_inequal_from_box(length: float, width: float, height: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Generate inequality constraints for a 3D axis-aligned box.
+
+    Args:
+        length (float): box length along x.
+        width (float): box width along y.
+        height (float): box height along z.
+
+    Returns:
+        tuple: G matrix (6x3) and h vector (6x1) for Gx <= h.
+    """
+    lx, ly, lz = length / 2.0, width / 2.0, height / 2.0
+
+    G = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ]
+    )
+    h = np.array([[lx], [lx], [ly], [ly], [lz], [lz]])
+
+    return G, h
+
 
 def gen_inequal_from_vertex(vertex: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """

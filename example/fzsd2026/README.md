@@ -1,0 +1,231 @@
+# fzsd2026 哨兵机器人 · NeuPAN 3D 局部规划
+
+本目录把 [NeuPAN](https://github.com/hanruihua/neupan) 局部规划器接到 fzsd2026 哨兵机器人上，
+并用一个 ROS 2 节点把它和 RoboMaster Gazebo 仿真（`rmul_2025` 场地）打通：
+
+```
+  静态地图 / A*（可选）          里程计 odom                  3D 激光 livox/lidar
+        │                            │                              │
+        ▼                            ▼                              ▼
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ neupan_ros2_bridge.py                                                │
+  │   · 点云 → “地面坐标系”（z=0 为地面），滤地面/滤自车                        │
+  │   · 滚动占据栅格（可选 A* 参考路径 / 卡死时侧向绕行）                      │
+  │   · NeuPAN 3D 盒模型 (0.6×0.5×0.5 m) 每 20 ms 求解                        │
+  │   · 发布 chassis_cmd、参考/优化轨迹、DUNE/NRMP 采样点、滤波后点云、TF        │
+  └──────────────────────────────────────────────────────────────────────┘
+        │                            │                              │
+        ▼                            ▼                              ▼
+  <robot_ns>/robot_base/chassis_cmd   /neupan_*  话题（RViz）      map→odom→base_footprint
+        │
+        ▼
+  rmoss_gz_base（底盘控制器） → Gazebo MecanumDrive2 → 机器人运动
+```
+
+![RViz 中的 NeuPAN 规划结果](img/rviz_neupan.png)
+
+*RViz（`map` 坐标系）：橙色为桥接节点送给 NeuPAN 的障碍点云，绿色盒子为机器人盒模型，
+白线为参考路径，细线为 MPC 优化轨迹，箭头为当前目标点。*
+
+## 1. 环境
+
+* ROS 2 Humble + Ignition Gazebo 6（`ign gazebo 6.18`）
+* 工作区：`~/fzsd2026`，已 `colcon build` 出 `install/setup.bash`
+* Python 依赖：`torch`、`cvxpy`、`numpy`、`scipy`、`PyYAML`、`irsim`（仅 irsim 演示需要）
+
+```bash
+cd ~/fzsd2026
+colcon build --symlink-install            # 首次或改动 C++ 包后
+source install/setup.bash
+```
+
+## 2. 一键跑起来
+
+```bash
+cd src/NeuPAN/example/fzsd2026
+
+./run_sim.sh                 # 无界面 Gazebo + 两台机器人 + NeuPAN 桥接（自动沿 planner.yaml 路线行驶）
+./run_sim.sh --rviz          # 同上，并打开 RViz（推荐：能看到点云、DUNE/NRMP 点、轨迹）
+./run_sim.sh --wait          # 不自动跑 yaml 路线，等 /goal_pose
+./run_sim.sh --goal 5.0 -1.0 0.0   # 启动后直接去指定目标点
+
+./stop_sim.sh                # 关掉上面启动的一切
+```
+
+RViz 里用工具栏 **2D Goal Pose** 点一个目标点即可重新规划；`map` 为固定坐标系。
+也可以通过命令行发目标：
+
+```bash
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: map}, pose: {position: {x: 5.0, y: -1.0}, orientation: {w: 1.0}}}"
+```
+
+日志在 `/tmp/neupan_run/`（可用 `NEUPAN_LOG_DIR` 改）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `gazebo.log` | Gazebo server |
+| `spawn.log` | 机器人生成、ros_gz_bridge |
+| `neupan_bridge.log` | 规划器状态（位姿、最小间距、速度、重规划事件） |
+
+> **为什么要 `-s`（无界面）启动 Gazebo？**
+> 这台机器上把 GUI 和 server 放进同一个进程时，Gazebo 6 的 Sensors 系统不发布
+> `livox/lidar` 与相机话题（雷达恒无数据）。用 `ign gazebo -s` 单独跑 server 时一切正常，
+> 因此 `run_sim.sh` 默认无界面；需要看场景时加 `--gui`（只挂一个 viewer）或用 RViz。
+
+## 3. 直接只启动桥接（仿真已在运行时）
+
+```bash
+python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
+    --params-file example/fzsd2026/bridge_params.yaml
+```
+
+常用参数覆盖（`-p 名字:=值`）：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `robot_ns` | `red_standard_robot1` | 机器人命名空间（话题前缀） |
+| `planner_config` | `planner.yaml` | NeuPAN 配置文件 |
+| `control_rate` | `50.0` | 规划/控制频率 Hz |
+| `lidar_height` | `0.44` | 雷达离地高度 [m]；`0` = 用点云自动估计 |
+| `ground_clearance` | `0.06` | 低于该离地高度的点视为地面丢弃 |
+| `max_points` | `600` | 送入 DUNE 的最大点数 |
+| `max_linear_speed` | `1.5` | 线速度上限 [m/s]（0 = 用 planner.yaml） |
+| `goal_tolerance` | `0.35` | 判定到点距离 [m] |
+| `use_startup_waypoints` | `true` | 是否开机就沿 `planner.yaml` 的 waypoints 走 |
+| `use_local_grid` | `true` | 维护滚动占据栅格（用于绕行方向评估） |
+| `use_local_planner` | `false` | 用栅格 A* 直接生成参考路径（实验特性） |
+| `use_global_planner` | `false` | 用静态地图 A* 生成参考路径 |
+| `global_map` | `''` | 地图 yaml（`use_global_planner=true` 时必填） |
+| `max_detours` / `detour_step` | `4` / `0.9` | 卡死时侧向让开的次数与步长 [m] |
+
+## 4. 验证结果
+
+以下都是本机实测（`rmul_2025` 场地，红方出生点 `(-5.0, 3.0)`）。
+
+| 用例 | 命令 | 结果 |
+| --- | --- | --- |
+| irsim 离线回归 | `python3 example/fzsd2026/smoke_test_irsim.py` | 600 步内到点，最近障碍 0.40 m，退出码 0 |
+| 栅格 A* 自检 | `python3 example/fzsd2026/local_grid.py` | 绕墙 13.33 m（直线 10 m），自检通过 |
+| 仿真直行到点 | `./run_sim.sh` | `(-5,3) → (5,0)` 约 **9–10 s**，最小障碍间距 0.30 m，到点正常停车 |
+| 仿真动态绕障 | `./run_sim.sh --wait` 后 `python3 example/fzsd2026/test_sim_dynamic.py` | 蓝车停在红车路径 `(3.26,-0.61)`，红车 **27.7 s** 绕行到 `(5.5,-1.5)`，两车最小中心距 **1.01 m**，PASS |
+| 仿真单目标点 | `./run_sim.sh --wait` 后 `test_sim_goal.py --goal -3 -2 0` | **5.6 s** 到点，3 s 后速度 0.000 m/s（确实停住） |
+| 目标不可达（场地死角） | `test_sim_goal.py --goal 5 -4.5 0` | 尝试 4 次侧向绕行后安全停车（不撞、不顶死），打印 `still in collision after the detours` |
+
+`test_sim_dynamic.py` 的判定：到达目标 **且** 两车中心距 > 0.55 m（对应盒模型不接触）。
+三个场景可以用 `./check_all.sh` 一次性复跑（结束后自动关掉仿真）。
+
+## 5. 测试脚本
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/fzsd2026/install/setup.bash
+cd ~/fzsd2026/src/NeuPAN/example/fzsd2026
+
+python3 smoke_test_irsim.py                                  # 无需 ROS，irsim 闭环回归
+python3 local_grid.py                                        # 占据栅格 + A* 自检
+python3 test_sim_goal.py --goal 5 0 0 --timeout 60           # 仿真单目标点（含停车校验）
+python3 test_sim_dynamic.py --goal 5.5 -1.5 --blocker-goal 1.5 1.5
+```
+
+`test_sim_goal.py` 会把轨迹写成 CSV（`--csv`，默认 `/tmp/neupan_goal_trace.csv`），
+`test_sim_dynamic.py` 打印最小中心距并给出 PASS/FAIL。
+
+## 6. NeuPAN 3D 改造说明（相对上游 1.3）
+
+哨兵车体近似为 0.6×0.5×0.5 m 的盒子，因此把 NeuPAN 的“2D 多边形机器人 + 2D 点云”
+扩展成“3D 盒子机器人 + 3D 点云”：
+
+| 文件 | 改动 |
+| --- | --- |
+| `neupan/robot/robot.py` | `robot` 新增 `height` / `z_robot`；给了 `height` 时用盒模型（`shape="box"`、`G` 为 6×3 的半空间约束） |
+| `neupan/util/__init__.py` | 新增 `gen_inequal_from_box()`（6 个面：±x/±y/±z）与 `get_transform_3d()` |
+| `neupan/blocks/pan.py` | 点流变换按 `G.shape[1]` 区分 2D/3D：3D 时旋转绕 z 轴、平移带 `z_robot`，得到以**盒中心**为原点的点云 |
+| `neupan/blocks/dune.py` | `ObsPointNet` 输入维度改为 `G.shape[1]`（3D 时 3），不再写死 2 |
+| `neupan/blocks/nrmp.py` | `fa` 取 `lam[:2]`（平面状态只有 x/y 自由度）；`fb` 在 3D 时减去 `lam_z * z_robot` |
+| `neupan/blocks/dune_train.py` | 数据生成支持 3 维（`data_range` 6 元）、旋转矩阵 3×3、支持断点续训（`resume_checkpoint` / `start_epoch`，含学习率对齐） |
+| `neupan/neupan.py` | `scan_to_point` 对 3D 机器人自动把 2D 扫描抬到 `scan_height`（默认 `z_robot`）；`scan_to_point_velocity` 修正传感器外参变换方向并同样支持 3D；`init_from_yaml` 允许 `dune_checkpoint` 相对配置文件目录解析 |
+
+坐标系约定（**重要**）：送入规划器的障碍点 `z` 以**地面为 0**、`z_robot` 是盒中心离地高度
+（`planner.yaml` 里 `z_robot: 0.25`）。桥接节点负责把雷达点从“雷达系”换算到该“地面系”：
+
+```
+z_ground = lidar_height + z_lidar
+```
+
+`lidar_height` 默认 0.44 m（本仿真实测值，可用点云 0.5 分位数自动标定），
+比 `base_footprint→front_mid360`（0.33 m）大，是因为本仿真场地地面比世界原点高约 0.11 m；
+上实车时按实车雷达离地高度设置即可。
+
+3D DUNE 权重已训练好并随仓库提供：
+
+```
+model/fzsd2026_sentry_3d/model_2000.pth        # planner.yaml 默认使用（6×3 盒模型）
+model/fzsd2026_sentry_3d_1/  _3d_2/            # 继续训练的版本（含 results.txt 曲线）
+model/fzsd2026_sentry/                         # 早期 2D 版本，仅作对照
+```
+
+重新训练：
+
+```bash
+cd src/NeuPAN
+PYTHONPATH=$(pwd) python3 example/fzsd2026/dune_train_fzsd2026.py
+```
+
+脚本会自动找 `model/fzsd2026_sentry_3d/` 里最大 epoch 的 `model_*.pth` 续训。
+
+## 7. irsim 可视化演示（不依赖 ROS）
+
+```bash
+cd src/NeuPAN
+python3 example/fzsd2026/run_demo.py              # 自动驶向 env.yaml 的目标点
+python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目标
+```
+
+`env.yaml` 是仿真环境（障碍物、机器人初始位姿、目标点），`planner.yaml` 是规划器配置；
+两个 demo 都从机器人当前位姿到 `env.yaml` 的目标点生成参考路径。
+
+## 8. 已知限制 / 注意事项
+
+1. **目标落在窄死角内时不会强行挤进去**：如 `(5.0,-4.5)`（蓝车与场地图元之间），
+   机器人会尝试至多 `max_detours` 次侧向绕行，仍无法通过则安全停车并打印原因。
+   发一个新目标即可重试。
+2. **工作区里的静态地图与 Gazebo 世界对不上**：`pb2025_nav_bringup/map/simulation/rmul_2025.pgm`
+   的原点/尺度不覆盖 Gazebo 世界坐标（实测 A* 从出生点到场地中部常无解），
+   所以 `use_global_planner` 默认关闭；等拿到与仿真世界一致的静态地图（或用 nav2 的
+   SLAM/定位建图）再打开，并把 `map` 与 `odom` 的固定变换交给定位模块。
+3. **本仿真的里程计就是世界坐标**：`/red_standard_robot1/chassis_odometry_gt` 的 x/y 与
+   Gazebo 世界坐标一致（`z` 恒为 0），所以桥接把 `map→odom` 发布成单位变换。
+   实车上若 `odom` 以开机点为原点，请让定位节点发布 `map→odom`，并把
+   `use_startup_waypoints` / `startup_goal` 的坐标换算到 map 系。
+4. **底盘是麦轮（omni）**：`planner.yaml` 里 `kinematics: 'omni'`，桥接发布 `(vx, vy)`；
+   `ChassisCmd.VELOCITY` 的 `(vx,vy)` 由 `rmoss_gz_base` 旋转到云台系，云台保持 0 度时等价于车体系。
+5. **重规划策略**：默认只用“直连参考路径 + 碰撞约束”，卡死（指令速度 > 0.25 m/s 但 1 s 内
+   位移 < 0.05 m）或安全停车时，用滚动栅格评估左右两侧净空，插入一个侧向中间航点绕行。
+   `use_local_planner: true` 可改成持续用栅格 A* 生成参考路径（实验特性，容易抖动）。
+
+## 9. 修过的仿真侧问题
+
+* `rmoss_gz_plugins/LightBarController` 原实现在应用灯光颜色时**删除并重建** `light_bar_visual`
+  实体；Gazebo 6 的 Sensors 渲染线程会并发重建同名 visual，导致 headless 模式启动机器人时
+  server 段错误（`SceneManager::CreateVisual`）。现改为**原地更新 `Material` 组件**，
+  headless 与 GUI 都稳定。改动在
+  `src/fzsd2026_gazebo_simulator/rmoss_gazebo/rmoss_gz_plugins/plugins/light_bar_controller/LightBarController.cc`，
+  需要 `colcon build --packages-select rmoss_gz_plugins`。
+* `run_sim.sh` 已把 `IGN_GAZEBO_RESOURCE_PATH` 补齐到 `fzsd2026_robot_description` 的
+  `resource/models`，否则 `spawn_robots` 找不到 `model://rplidar_a2/...`。
+
+## 10. 文件清单
+
+| 文件 | 说明 |
+| --- | --- |
+| `neupan_ros2_bridge.py` | ROS 2 桥接节点（核心） |
+| `bridge_params.yaml` | 桥接节点参数 |
+| `planner.yaml` | NeuPAN 配置（3D 盒模型、DUNE 权重、代价参数） |
+| `env.yaml` / `run_demo*.py` | irsim 演示 |
+| `global_planner.py` | 静态地图 A*（可选） |
+| `local_grid.py` | 滚动占据栅格 + A*（卡死绕行方向评估 / 实验参考路径） |
+| `run_sim.sh` / `stop_sim.sh` | 一键启动 / 关闭 |
+| `check_all.sh` | 三个验收场景一键复跑 |
+| `test_sim_goal.py` / `test_sim_dynamic.py` | 仿真验收脚本 |
+| `neupan.rviz` / `img/` | RViz 配置（`map` 坐标系）、截图 |
+| `model/` | DUNE 训练权重与训练记录 |

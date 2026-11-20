@@ -25,7 +25,7 @@ import cvxpy as cp
 from math import sin, cos, tan
 import torch
 from neupan.configuration import to_device 
-from neupan.util import gen_inequal_from_vertex
+from neupan.util import gen_inequal_from_vertex, gen_inequal_from_box
 
 class robot:
 
@@ -40,17 +40,28 @@ class robot:
         wheelbase: Optional[float] = None,
         length: Optional[float] = None,
         width: Optional[float] = None,
+        height: Optional[float] = None,
+        z_robot: float = 0.15,
         **kwargs,
     ):
-        
+
         if kinematics is None:
             raise ValueError("kinematics is required")
 
         self.shape = None
+        self.z_robot = z_robot
 
-        self.vertices = self.cal_vertices(vertices, length, width, wheelbase)
-        
-        self.G, self.h = gen_inequal_from_vertex(self.vertices)
+        if height is not None:
+            # 3D box geometry for DUNE 3D collision avoidance
+            self.shape = "box"
+            self.length = length
+            self.width = width
+            self.height = height
+            self.vertices = None
+            self.G, self.h = gen_inequal_from_box(length, width, height)
+        else:
+            self.vertices = self.cal_vertices(vertices, length, width, wheelbase)
+            self.G, self.h = gen_inequal_from_vertex(self.vertices)
 
         self.T = receding
         self.dt = step_time

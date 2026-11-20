@@ -242,12 +242,17 @@ class NRMP(torch.nn.Module):
             else:
                 for t in range(self.T):
                     mu, lam, point = mu_list[t + 1], lam_list[t + 1], point_list[t + 1]
-                    fa = lam.T
+                    fa = lam[:2].T  # xy components; planar state has no z dof
                     temp = (
                         torch.bmm(lam.T.unsqueeze(1), point.T.unsqueeze(2))
                     ).squeeze(1)
 
                     fb = temp + mu.T @ self.h
+                    if lam.shape[0] == 3:
+                        # 3D: subtract lam_z * z_robot (robot center height) since
+                        # the state is 2D planar but the box center sits at z_robot.
+                        # For a 2D robot lam has only 2 rows, so this term is skipped.
+                        fb = fb - lam[2:].T * self.robot.z_robot
 
                     # lamb = mu.T @ self.h + torch.matmul(fa.unsqueeze(1), point.T.unsqueeze(2)).squeeze(1)
 

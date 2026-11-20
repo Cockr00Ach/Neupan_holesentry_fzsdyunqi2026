@@ -18,6 +18,8 @@ You should have received a copy of the GNU General Public License
 along with NeuPAN planner. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import os
+
 import yaml
 import torch
 from neupan.robot import robot
@@ -93,6 +95,18 @@ class neupan(torch.nn.Module):
             config = yaml.safe_load(f)
             config.update(kwargs)
 
+        # Resolve a relative DUNE checkpoint against the config file directory when it
+        # does not exist relative to the current working directory. This keeps the
+        # examples runnable from any directory, not only from the repository root.
+        pan_config = config.get("pan")
+        if isinstance(pan_config, dict):
+            checkpoint = pan_config.get("dune_checkpoint")
+            if isinstance(checkpoint, str) and checkpoint and checkpoint.lower() != "none":
+                if not os.path.exists(checkpoint):
+                    candidate = os.path.join(os.path.dirname(abs_path), checkpoint)
+                    if os.path.exists(candidate):
+                        pan_config["dune_checkpoint"] = candidate
+
         config["robot_kwargs"] = config.pop("robot", dict())
         config["ipath_kwargs"] = config.pop("ipath", dict())
         config["pan_kwargs"] = config.pop("pan", dict())
@@ -105,8 +119,8 @@ class neupan(torch.nn.Module):
     def forward(self, state, points, velocities=None):
         """
         state: current state of the robot, matrix (3, 1), x, y, theta
-        points: current input obstacle point positions, matrix (2, N), N is the number of obstacle points.
-        velocities: current velocity of each obstacle point, matrix (2, N), N is the number of obstacle points. vx, vy
+        points: current input obstacle point positions, matrix (3, N), N is the number of obstacle points (global coordinate, z = absolute height).
+        velocities: current velocity of each obstacle point, matrix (3, N), N is the number of obstacle points. vx, vy, vz
         """
 
         assert state.shape[0] >= 3
@@ -177,6 +191,7 @@ class neupan(torch.nn.Module):
         scan_offset: list[float] = [0, 0, 0],
         angle_range: list[float] = [-np.pi, np.pi],
         down_sample: int = 1,
+        scan_height: float | None = None,
     ) -> np.ndarray | None:
         
         """
@@ -190,8 +205,12 @@ class neupan(torch.nn.Module):
                 range_min: float, the minimum range of the scan
 
             scan_offset: [x, y, theta], the relative position of the sensor to the robot state coordinate
+            scan_height: float, absolute height (z) of the 2D scan plane. Only used by a 3D
+                robot model (box geometry). Defaults to the robot center height ``z_robot``,
+                i.e. the plane the box geometry is built around. Set it to the physical
+                mounting height when the lidar is not at the box center.
 
-        return point cloud: (2, n)
+        return point cloud: (2, n) for a planar robot, (3, n) for a 3D box robot
         """
         point_cloud = []
 
@@ -219,6 +238,11 @@ class neupan(torch.nn.Module):
         trans, R = get_transform(state)
         points = (R @ temp_points + trans)[:, ::down_sample]
 
+        if self.robot.G.shape[1] == 3:
+            # 2D scan plane lifted to the requested absolute height for the 3D box robot
+            z = self.robot.z_robot if scan_height is None else scan_height
+            points = np.vstack([points, np.full((1, points.shape[1]), z)])
+
         return points
 
     def scan_to_point_velocity(
@@ -228,6 +252,7 @@ class neupan(torch.nn.Module):
         scan_offset=[0, 0, 0],
         angle_range=[-np.pi, np.pi],
         down_sample=1,
+        scan_height: float | None = None,
     ):
         """
         input:
@@ -241,8 +266,9 @@ class neupan(torch.nn.Module):
                 velocity: list[float], the velocity of the scan
 
             scan_offset: [x, y, theta], the relative position of the sensor to the robot state coordinate
+            scan_height: float, absolute height (z) of the 2D scan plane for a 3D box robot.
 
-        return point cloud: (2, n)
+        return point cloud: (2, n) for a planar robot, (3, n) for a 3D box robot
         """
         point_cloud = []
         velocity_points = []
@@ -269,14 +295,17 @@ class neupan(torch.nn.Module):
 
         point_array = np.hstack(point_cloud)
         s_trans, s_R = get_transform(np.c_[scan_offset])
-        temp_points = s_R.T @ (
-            point_array - s_trans
-        )  # points in the robot state coordinate
+        temp_points = s_R @ point_array + s_trans  # points in the robot state coordinate
 
         trans, R = get_transform(state)
         points = (R @ temp_points + trans)[:, ::down_sample]
 
         velocity = np.hstack(velocity_points)[:, ::down_sample]
+
+        if self.robot.G.shape[1] == 3:
+            z = self.robot.z_robot if scan_height is None else scan_height
+            points = np.vstack([points, np.full((1, points.shape[1]), z)])
+            velocity = np.vstack([velocity, np.zeros((1, velocity.shape[1]))])
 
         return points, velocity
 

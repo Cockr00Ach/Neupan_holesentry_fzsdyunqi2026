@@ -1,0 +1,65 @@
+# Parameters for example/fzsd2026/neupan_ros2_bridge.py
+#
+#   python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
+#       --params-file example/fzsd2026/bridge_params.yaml
+neupan_bridge:
+  ros__parameters:
+    robot_ns: 'red_standard_robot1'
+    map_frame: 'map'
+    odom_frame: 'odom'
+    base_frame: 'base_footprint'
+
+    # NeuPAN planner config (relative paths are resolved against this file's directory)
+    planner_config: 'planner.yaml'
+
+    control_rate: 50.0
+    publish_visualization: true
+    publish_tf: true
+
+    # topics (empty -> defaults derived from robot_ns)
+    odom_topic: ''
+    points_topic: ''
+    goal_topic: '/goal_pose'
+    initial_path_topic: '/initial_path'
+
+    # point cloud preprocessing
+    lidar_height: 0.44        # lidar height above the floor [m]; 0 = auto-detect
+    ground_clearance: 0.06    # drop points lower than this above the floor
+    max_points: 600
+    self_filter_margin: 0.06
+    max_range: 12.0
+
+    # reference-path planning on the rolling occupancy grid built from the lidar
+    # (A* on live observations; unknown space is assumed free, NeuPAN handles safety)
+    use_local_grid: true      # keep the rolling occupancy grid (clearance, detours)
+    use_local_planner: false  # A* reference path on that grid (experimental)
+    local_grid_size: [40.0, 40.0]
+    local_grid_resolution: 0.1
+    local_grid_decay: 6.0
+    local_inflation: 0.5
+    local_lookahead: 4.0
+    replan_interval: 1.0
+
+    goal_tolerance: 0.35
+    # false -> ignore the planner.yaml waypoints and wait for a /goal_pose
+    use_startup_waypoints: true
+    max_detours: 4
+    detour_step: 0.9
+
+    # "commanded to move but not moving" detection -> replan around the blockage
+    stuck_time: 1.0
+    stuck_distance: 0.05
+
+    # static-map global planner (A*); keep it off unless the map matches the robot's
+    # map frame (the shipped simulation maps do not cover the Gazebo world)
+    use_global_planner: false
+    global_map: ''
+    inflation_radius: 0.45
+    map_waypoint_interval: 0.35
+
+    # speed limits (0 -> take them from planner.yaml)
+    max_linear_speed: 1.5
+    max_angular_speed: 0.0
+
+    # sentinel -> use the waypoints from planner.yaml
+    startup_goal: [-99.0, -99.0, 0.0]

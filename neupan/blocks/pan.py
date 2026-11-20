@@ -115,8 +115,8 @@ class PAN(torch.nn.Module):
             - nom_u: nominal control; (2, receding)
             - ref_states: reference trajectory; (3, receding+1)
             - ref_us: reference speed array;  (receding,)
-            - obs_points: (2, number of obs points), point cloud, global coordinate
-            - velocities: (2, number of obs points), velocity of each obs point
+            - obs_points: (3, number of obs points), point cloud, global coordinate
+            - velocities: (3, number of obs points), velocity of each obs point
 
         output:
             - opt_vel: optimal velocity tensor; (2, receding)
@@ -154,13 +154,13 @@ class PAN(torch.nn.Module):
 
         Args:
             nom_s: (3, receding+1)
-            obs_points: (2, n)
-            point_velocities: (2, n), x,y vel
+            obs_points: (3, n)
+            point_velocities: (3, n), x,y,z vel
 
         Returns:
-            point_flow_list: list of (2, n); robot coordinate
-            R_list: list of (2, 2); rotation matrix
-            obs_points_list: list of (2, n); global coordinate
+            point_flow_list: list of (3, n); robot coordinate
+            R_list: list of (3, 3); rotation matrix
+            obs_points_list: list of (3, n); global coordinate
         '''
 
         # down sample the obs points by dune max num 
@@ -192,22 +192,35 @@ class PAN(torch.nn.Module):
 
         '''
         transform the position of obstacle points to the robot coordinate system in each receding step
-        
-        input: 
+
+        input:
             state: [x, y, theta] -- transition and rotation matrix
-            obs_points: (2, n) -- point cloud
+            obs_points: (3, n) -- point cloud (global coordinate, z = absolute height)
 
         output:
-            p0: (2, n) point cloud in the robot coordinate system
-            R: (2, 2) rotation matrix
+            p0: (3, n) point cloud in the robot coordinate system
+            R: (3, 3) rotation matrix (around z)
         '''
 
         state = state.reshape((3, 1))
         trans = state[0:2]
         theta = state[2, 0]
-        R = to_device(torch.tensor([[torch.cos(theta), -torch.sin(theta)], [torch.sin(theta), torch.cos(theta)]]))
 
-        p0 = R.T @ (obs_points - trans)
+        c, s = torch.cos(theta).detach(), torch.sin(theta).detach()
+
+        if self.robot.G.shape[1] == 3:
+            # 3D: robot center sits at height z_robot above ground
+            trans_3d = torch.vstack(
+                [trans, to_device(torch.tensor([[self.robot.z_robot]]))]
+            )
+            R = to_device(
+                torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+            )
+            p0 = R.T @ (obs_points - trans_3d)
+        else:
+            # 2D: original planar transform
+            R = to_device(torch.tensor([[c, -s], [s, c]]))
+            p0 = R.T @ (obs_points - trans)
 
         return p0, R
     

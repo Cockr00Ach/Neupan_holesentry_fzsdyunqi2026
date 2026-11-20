@@ -4,15 +4,15 @@ step_time: 0.1
 ref_speed: 4
 device: 'cpu'
 time_print: True
-collision_threshold: 0.1
+collision_threshold: 0.03
 
 # robot
 robot:
   kinematics: 'omni'
-  max_speed: [8, 6.28]
-  max_acce: [2, 1]
-  length: 1.6
-  width: 2.0
+  max_speed: [3.0, 6.28]
+  max_acce: [2.0, 4.0]
+  length: 0.6
+  width: 0.5
 
 # initial path
 ipath:
@@ -31,18 +31,18 @@ pan:
   iter_num: 2
   dune_max_num: 100
   nrmp_max_num: 10
-  dune_checkpoint: None
-  iter_threshold: 0.1
-  dune_checkpoint: 'example/model/diff_robot_default/model_5000.pth'
+  dune_checkpoint: 'example/fzsd2026/model/fzsd2026_sentry/model_5000.pth'
 
 
 # adjust parameters
 adjust:
-  q_s: 0.6
-  p_u: 0.4
-  eta: 10.0
-  d_max: 1.0
-  d_min: 0.1
+  q_s: 1.0
+  p_u: 1.0
+  eta: 15.0
+  d_max: 0.4
+  d_min: 0.04
+  ro_obs: 250
+  bk: 0.5
 
   
 

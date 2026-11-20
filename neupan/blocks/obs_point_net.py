@@ -23,7 +23,7 @@ import torch.nn as nn
 import torch
 
 class ObsPointNet(nn.Module):
-    def __init__(self, input_dim: int = 2,  output_dim: int=4) -> None:
+    def __init__(self, input_dim: int = 3,  output_dim: int=4) -> None:
         super(ObsPointNet, self).__init__()
 
         hidden_dim = 32
