@@ -24,7 +24,7 @@ bash run_sim.sh --wait --nav-only --planner-config "$YAML" >/dev/null 2>&1
 sleep 14
 
 rm -rf "/tmp/run_$NAME"
-ros2 bag record -o "/tmp/run_$NAME" /neupan_status >/tmp/bag_$NAME.log 2>&1 &
+ros2 bag record -o "/tmp/run_$NAME" /neupan_status /neupan_initial_path >/tmp/bag_$NAME.log 2>&1 &
 BAG=$!
 sleep 3
 

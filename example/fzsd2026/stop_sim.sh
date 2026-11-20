@@ -2,7 +2,7 @@
 # Stop everything started by run_sim.sh (Gazebo, robots, bridges, RViz).
 set +u
 
-KILL_PATTERNS=('neupan_ros2_bridge' 'web/web_server.py' 'rviz2' 'ign gazebo' 'rmua19_robot_base'
+KILL_PATTERNS=('neupan_ros2_bridge.py --ros-args' 'web/web_server.py --port' 'rviz2' 'ign gazebo' 'rmua19_robot_base'
                'ros_gz_bridge/parameter_bridge' 'rmu_gazebo_simulator/spawn_robots'
                'robot_state_publisher' 'pose_bridge' 'rfid_bridge' 'simple_competition')
 

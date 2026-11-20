@@ -30,7 +30,7 @@ neupan_bridge:
     lidar_height: 0.44        # lidar height above the floor [m]; 0 = auto-detect
     ground_clearance: 0.06    # drop points lower than this above the floor
     max_points: 600
-    self_filter_margin: 0.06
+    self_filter_margin: 0.10
     max_range: 12.0
 
     # reference-path planning on the rolling occupancy grid built from the lidar
@@ -47,8 +47,8 @@ neupan_bridge:
     max_recoveries: 8          # 连续“卡死/抽搐”的恢复尝试上限
     reverse_speed: 0.40        # 卡在缝里时倒退脱困的速度
     speed_adapt: true          # 靠近障碍自动降参考速度
-    min_ref_speed: 0.45
-    slowdown_distance: 1.2
+    min_ref_speed: 0.6
+    slowdown_distance: 0.8
 
     goal_tolerance: 0.35
     # false -> ignore the planner.yaml waypoints and wait for a /goal_pose

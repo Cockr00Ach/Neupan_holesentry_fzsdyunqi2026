@@ -80,7 +80,8 @@ echo "logs: $LOG_DIR"
 # parent shell, or any process whose command line mentions it (e.g. an editor).
 KILL_PATTERNS=('ign gazebo' 'rmua19_robot_base' 'ros_gz_bridge/parameter_bridge'
                'rmu_gazebo_simulator/spawn_robots' 'robot_state_publisher'
-               'neupan_ros2_bridge' 'pose_bridge' 'rfid_bridge' 'simple_competition')
+               'neupan_ros2_bridge.py --ros-args' 'web/web_server.py --port' 'pose_bridge' 'rfid_bridge'
+               'simple_competition')
 kill_leftovers() {
     local self_pid=$1
     local pid cmd pat

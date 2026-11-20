@@ -186,7 +186,7 @@ class NeuPANBridge(Node):
         self.declare_parameter('lidar_height', 0.0)      # 0 -> auto-detect from the cloud
         self.declare_parameter('ground_clearance', 0.06)  # drop points lower than this
         self.declare_parameter('max_points', 600)
-        self.declare_parameter('self_filter_margin', 0.06)
+        self.declare_parameter('self_filter_margin', 0.10)
         self.declare_parameter('max_range', 12.0)
 
         # local occupancy grid used to plan the reference path (A* on live lidar)
@@ -202,8 +202,8 @@ class NeuPANBridge(Node):
         self.declare_parameter('max_recoveries', 8)
         self.declare_parameter('reverse_speed', 0.40)        # back-out speed [m/s]
         self.declare_parameter('speed_adapt', True)          # slow down near obstacles
-        self.declare_parameter('min_ref_speed', 0.45)
-        self.declare_parameter('slowdown_distance', 1.2)
+        self.declare_parameter("min_ref_speed", 0.6)
+        self.declare_parameter("slowdown_distance", 0.8)
 
         # stuck detection / recovery
         self.declare_parameter('use_startup_waypoints', True)
@@ -539,6 +539,14 @@ class NeuPANBridge(Node):
                                [p.pose.position.y],
                                [quat_to_yaw(p.pose.orientation)]]).reshape(3, 1)
                      for p in msg.poses]
+        if not force and self._same_direction(waypoints):
+            # the replanned path leaves the same way: keep the current one to avoid the
+            # reference churn that made the robot weave
+            self.get_logger().info(
+                f'replan ignored ({reason}): {source} path is equivalent',
+                throttle_duration_sec=2.0)
+            return False
+
         self.planner.update_initial_path_from_waypoints(waypoints)
         self.planner.reset()
         self.arrived = False
@@ -670,6 +678,28 @@ class NeuPANBridge(Node):
             return waypoints, source
         return None, source
 
+    def _direction_at(self, points, distance=2.0):
+        """Bearing from the robot to the first path point at least ``distance`` away."""
+        rx, ry = float(self.robot_state[0, 0]), float(self.robot_state[1, 0])
+        for p in points:
+            dx, dy = float(p[0]) - rx, float(p[1]) - ry
+            if math.hypot(dx, dy) >= distance:
+                return math.atan2(dy, dx)
+        return None
+
+    def _same_direction(self, waypoints, tolerance_deg=20.0):
+        """True when the new plan leaves in (almost) the same direction as the old one."""
+        cur = self.planner.initial_path
+        if cur is None or len(waypoints) < 2:
+            return False
+        new_bearing = self._direction_at([(w[0, 0], w[1, 0]) for w in waypoints])
+        cur_bearing = self._direction_at([(p[0, 0], p[1, 0]) for p in cur])
+        if new_bearing is None or cur_bearing is None:
+            return False
+        diff = abs(math.atan2(math.sin(new_bearing - cur_bearing),
+                              math.cos(new_bearing - cur_bearing)))
+        return diff < math.radians(tolerance_deg)
+
     def _update_reference_path(self, reason='', force=False):
         """(Re)build the reference path, keeping the previous one when it still works."""
         if self.goal is None or self.robot_state is None:
@@ -692,6 +722,14 @@ class NeuPANBridge(Node):
                 throttle_duration_sec=2.0)
             return False
 
+        if not force and self._same_direction(waypoints):
+            # the replanned path leaves the same way: keep the current one to avoid the
+            # reference churn that made the robot weave
+            self.get_logger().info(
+                f'replan ignored ({reason}): {source} path is equivalent',
+                throttle_duration_sec=2.0)
+            return False
+
         self.planner.update_initial_path_from_waypoints(waypoints)
         self.planner.reset()
         self.arrived = False
@@ -710,9 +748,14 @@ class NeuPANBridge(Node):
         # a slightly smaller inflation here: the path may legitimately hug an obstacle
         inflation = max(0.2, self.local_inflation * 0.75)
         for pt in path[start_idx:start_idx + 80]:
-            if math.hypot(pt[0, 0] - self.robot_state[0, 0],
-                          pt[1, 0] - self.robot_state[1, 0]) > 5.0:
+            distance = math.hypot(pt[0, 0] - self.robot_state[0, 0],
+                                  pt[1, 0] - self.robot_state[1, 0])
+            if distance > 5.0:
                 break
+            # the robot's own neighbourhood is NeuPAN's business; checking it here made
+            # any path that starts next to a board look "blocked" and caused churn
+            if distance < 0.8:
+                continue
             if not self.local_grid.is_free((float(pt[0, 0]), float(pt[1, 0])), inflation):
                 return True
         return False
