@@ -167,7 +167,7 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | 轨迹 / DUNE/NRMP 标记 | 50 Hz | **15 Hz**（`viz_rate`） | RViz 与网页都够用 |
 | 网页 SSE 推流 | 16 Hz | **26 Hz** | 40 ms 轮询 + 只在数据变化时发 |
 | 单帧 JSON | 8.7 KB | **5.5 KB** | 点云 300 点 + 3 位小数 |
-| 浏览器绘制 | 17 fps | **26 fps** | `requestAnimationFrame` 合并 + 按高度分桶批量画点 |
+| 浏览器绘制 | 17 fps | **19–26 fps** | `requestAnimationFrame` 合并 + 按高度分桶批量画点（窗口在前台时更高） |
 
 结论：**不是传输问题**（localhost 上 5.5 KB × 26 Hz ≈ 140 KB/s，带宽和解析都很轻松），
 主要还是**数据源**——仿真在带相机时只跑到 0.68 倍实时，雷达实际只有 7 Hz；
