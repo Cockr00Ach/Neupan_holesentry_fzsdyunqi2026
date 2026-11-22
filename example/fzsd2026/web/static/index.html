@@ -134,6 +134,7 @@
     <div class="card">
       <div class="params-head">
         <h3 style="margin:0">图层</h3>
+        <button class="btn-mini" id="btn-load-map" title="把刚才保存的地图交给全局 A* 使用（不用重启）">加载为全局图</button>
         <button class="btn-mini" id="btn-save-map" title="把当前 SLAM 栅格地图存成 map_server 的 pgm/yaml">保存地图</button>
       </div>
       <div class="layers" id="layers">
@@ -833,6 +834,18 @@
       const j = await r.json();
       toast(j.ok ? `已保存：${j.prefix}` : (j.error || '保存失败'), !j.ok);
     } catch (e) { toast('保存失败', true); }
+  };
+
+  const loadMapBtn = $('btn-load-map');
+  if (loadMapBtn) loadMapBtn.onclick = async () => {
+    try {
+      const r = await fetch('/api/map/load', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'rmul_2025_slam.yaml' }),
+      });
+      const j = await r.json();
+      toast(j.ok ? `已加载全局地图：${j.path}` : (j.error || '加载失败'), !j.ok);
+    } catch (e) { toast('加载失败', true); }
   };
 
   const resetBtn = $('btn-reset-params');

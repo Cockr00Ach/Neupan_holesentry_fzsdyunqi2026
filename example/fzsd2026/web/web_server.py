@@ -23,6 +23,7 @@ Topics it writes
     /neupan_cancel            std_msgs/Empty              ("stop" button)
     /neupan_set_params        std_msgs/String             (live planner tuning, JSON)
     /neupan_save_map          std_msgs/String             (save the SLAM map, "保存地图")
+    /neupan_set_map           std_msgs/String             (load a saved map as global map)
 
 Run it standalone::
 
@@ -137,6 +138,7 @@ class WebBridge(Node):
         self.cancel_pub = self.create_publisher(Empty, '/neupan_cancel', 10)
         self.map_pub = None  # set below (kept for clarity)
         self.save_map_pub = self.create_publisher(String, '/neupan_save_map', 10)
+        self.set_map_pub = self.create_publisher(String, '/neupan_set_map', 10)
         self.map_msg = None
         self.map_version = 0
         self.create_subscription(OccupancyGrid, '/neupan_map', self.on_map, 2)
@@ -202,6 +204,12 @@ class WebBridge(Node):
         msg.data = prefix
         self.save_map_pub.publish(msg)
         self.get_logger().info(f'web: save map -> {prefix}')
+
+    def load_map(self, path: str):
+        msg = String()
+        msg.data = path
+        self.set_map_pub.publish(msg)
+        self.get_logger().info(f'web: load global map {path}')
 
     def map_snapshot(self, downsample=2):
         """Downsampled map with run-length encoding (small enough for the browser)."""
@@ -342,6 +350,18 @@ def api_map_save():
         prefix = os.path.join(os.path.dirname(HERE), 'map', prefix)
     NODE.save_map(prefix)
     return jsonify({'ok': True, 'prefix': prefix})
+
+
+@app.route('/api/map/load', methods=['POST'])
+def api_map_load():
+    if NODE is None:
+        return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
+    payload = request.get_json(silent=True) or {}
+    path = payload.get('path') or ''
+    if path and not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(HERE), 'map', path)
+    NODE.load_map(path)
+    return jsonify({'ok': True, 'path': path})
 
 
 @app.route('/api/params', methods=['GET'])

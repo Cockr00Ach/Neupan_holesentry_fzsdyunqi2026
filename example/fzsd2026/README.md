@@ -204,7 +204,8 @@ map_server 的 `pgm/yaml`，给全局 A* 用。
 ./run_sim.sh --slam --web --nav-only
 #    让车跑一圈，或者在网页上点目标点跑几趟；地图会自动累积
 
-# 2) 网页“图层”卡片右上角点【保存地图】，或命令行：
+# 2) 网页“图层”卡片右上角点【保存地图】→【加载为全局图】即可立刻用这张图规划（不用重启）；
+#    或者用命令行：
 ros2 topic pub --once /neupan_save_map std_msgs/msg/String \
   "{data: '$PWD/map/rmul_2025_slam'}"
 
@@ -216,6 +217,7 @@ ros2 topic pub --once /neupan_save_map std_msgs/msg/String \
 | --- | --- |
 | `GET /api/map` | 当前地图（下采样到 0.1 m、RLE 压缩，约 1k 段，前端一次性转成离屏画布） |
 | `POST /api/map/save` | `{"name": "rmul_2025_slam"}` → 保存到 `map/<name>.pgm/.yaml` |
+| `POST /api/map/load` | `{"path": "rmul_2025_slam.yaml"}` → 立刻把这张图交给全局 A*（不用重启节点） |
 | `/neupan_map` | 实时 `OccupancyGrid`（0.05 m，480×480） |
 | `/neupan_save_map` | `String` 消息 = 保存前缀（绝对路径） |
 | `/neupan_reset_map` | `Empty`，清空地图 |

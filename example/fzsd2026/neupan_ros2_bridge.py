@@ -40,6 +40,8 @@ Subscribed (control)
     /neupan_cancel                std_msgs/Empty   stop and clear the goal (web "stop")
     /neupan_set_params            std_msgs/String  live-tune q_s/p_u/eta/d_max/d_min/ref_speed
                                                    (JSON, {"reset": true} restores the yaml)
+    /neupan_set_map               std_msgs/String  load a map_server yaml as the global
+                                                   map (empty string = disable)
 
 Run it with::
 
@@ -382,6 +384,7 @@ class NeuPANBridge(Node):
         self.status_pub = self.create_publisher(String, '/neupan_status', 10)
         self.create_subscription(Empty, '/neupan_cancel', self.cancel_callback, 10)
         self.create_subscription(String, '/neupan_set_params', self.set_params_callback, 10)
+        self.create_subscription(String, '/neupan_set_map', self.set_map_callback, 10)
 
         if self.publish_tf:
             self.tf_broadcaster = TransformBroadcaster(self)
@@ -493,6 +496,36 @@ class NeuPANBridge(Node):
         self.planner.reset()
         self._publish_stop()
         self.get_logger().info('cancelled: goal cleared, robot stopped')
+
+    def set_map_callback(self, msg: String):
+        """Load (or unload) a static map for the global planner at runtime."""
+        path = msg.data.strip()
+        if not path:
+            self.global_planner = None
+            self._last_event = 'global map disabled'
+            self.get_logger().info('global map disabled')
+            return
+        resolved = resolve_path(path, CUR_DIR)
+        if GlobalPlanner is None:
+            self.get_logger().warn('global planner unavailable (PIL/scipy missing)')
+            return
+        if not os.path.exists(resolved):
+            self.get_logger().warn(f'global map not found: {resolved}')
+            return
+        try:
+            self.global_planner = GlobalPlanner(
+                resolved,
+                inflation_radius=float(self.get_parameter('inflation_radius').value),
+                downsample_interval=float(self.get_parameter('map_waypoint_interval').value))
+        except Exception as exc:  # pragma: no cover - bad map file
+            self.get_logger().warn(f'cannot load {resolved}: {exc}')
+            return
+        self._last_event = f'global map loaded: {os.path.basename(resolved)}'
+        self.get_logger().info(
+            f'global map loaded: {resolved} '
+            f'({self.global_planner.width}x{self.global_planner.height} cells)')
+        if self.goal is not None:
+            self._update_reference_path(reason='map loaded', force=True)
 
     def set_params_callback(self, msg: String):
         """Live tuning from the web UI: {"q_s": 4, ...} or {"reset": true}."""
