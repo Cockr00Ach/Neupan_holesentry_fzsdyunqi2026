@@ -132,7 +132,10 @@
       <canvas id="iso"></canvas>
     </div>
     <div class="card">
-      <h3>图层</h3>
+      <div class="params-head">
+        <h3 style="margin:0">图层</h3>
+        <button class="btn-mini" id="btn-save-map" title="把当前 SLAM 栅格地图存成 map_server 的 pgm/yaml">保存地图</button>
+      </div>
       <div class="layers" id="layers">
         <label><input type="checkbox" data-layer="cloud" checked><span class="swatch" style="background:var(--cloud)"></span>障碍点云</label>
         <label><input type="checkbox" data-layer="dune" checked><span class="swatch" style="background:var(--dune)"></span>DUNE 点</label>
@@ -142,7 +145,9 @@
         <label><input type="checkbox" data-layer="plan" checked><span class="swatch" style="background:var(--bad)"></span>优化轨迹</label>
         <label><input type="checkbox" data-layer="astar" checked><span class="swatch" style="background:var(--accent)"></span>A* 路径</label>
         <label><input type="checkbox" data-layer="grid" checked><span class="swatch" style="background:#243041"></span>网格</label>
+        <label><input type="checkbox" data-layer="map" checked><span class="swatch" style="background:#6b7a91"></span>栅格地图</label>
       </div>
+      <div class="params-note" id="map-info">地图：未加载（启动 web/map_builder.py 后会实时累积）</div>
     </div>
     <div class="card">
       <div class="params-head">
@@ -185,7 +190,7 @@
     follow: true,
     goalMode: false,
     layers: { cloud: true, dune: true, nrmp: true, initial: true, ref: true,
-              plan: true, astar: true, grid: true },
+              plan: true, astar: true, grid: true, map: true },
     dragging: false,
     moved: false,
     last: null,
@@ -259,6 +264,71 @@
       const [, sy] = w2s(0, y);
       if (sy > 12 && sy < h - 8) mctx.fillText(String(y), ax + 5, sy - 4);
     }
+  }
+
+  // ---------------------------------------------------------------- SLAM map
+  const mapLayer = { canvas: null, res: 0.05, w: 0, h: 0, origin: [0, 0], version: -1,
+                     loading: false };
+
+  function buildMapCanvas(j) {
+    const w = j.width, h = j.height;
+    const data = new Int8Array(w * h);
+    let idx = 0;
+    for (const run of j.runs) {
+      const [value, count] = run;
+      data.fill(value, idx, idx + count);
+      idx += count;
+    }
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w;          // image row 0 = largest y
+      for (let x = 0; x < w; x++) {
+        const v = data[src + x];
+        const px = (y * w + x) * 4;
+        if (v === 100) {
+          img.data[px] = 104; img.data[px + 1] = 120; img.data[px + 2] = 146;
+          img.data[px + 3] = 255;
+        } else if (v === 0) {
+          img.data[px] = 17; img.data[px + 1] = 23; img.data[px + 2] = 32;
+          img.data[px + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    mapLayer.canvas = cv;
+    mapLayer.res = j.resolution;
+    mapLayer.w = w; mapLayer.h = h;
+    mapLayer.origin = j.origin;
+    mapLayer.version = j.version;
+  }
+
+  async function loadMap() {
+    if (mapLayer.loading) return;
+    mapLayer.loading = true;
+    try {
+      const r = await fetch('/api/map');
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.version === mapLayer.version) return;
+      buildMapCanvas(j);
+      const info = $('map-info');
+      if (info) {
+        info.textContent = `地图：${j.width}×${j.height} 格 @ ${j.resolution.toFixed(2)} m`
+          + `（v${j.version}）`;
+      }
+    } catch (e) { /* keep the previous map */ } finally { mapLayer.loading = false; }
+  }
+
+  function drawMapLayer() {
+    if (!state.layers.map || !mapLayer.canvas) return;
+    const { w, h, res } = mapLayer;
+    const [sx, sy] = w2s(mapLayer.origin[0], mapLayer.origin[1] + h * res);
+    mctx.imageSmoothingEnabled = false;
+    mctx.drawImage(mapLayer.canvas, sx, sy, w * res * state.view.scale,
+                   h * res * state.view.scale);
   }
 
   function drawPath(points, color, width, dash) {
@@ -366,6 +436,7 @@
   function draw() {
     if (!state.data) { mctx.fillStyle = COLORS.bg; mctx.fillRect(0, 0, mapSize.w, mapSize.h); }
     drawGrid();
+    drawMapLayer();
     const d = state.data || {};
     if (state.layers.initial) drawPath(d.initial, COLORS.initial, 1.5, [6, 5]);
     if (state.layers.astar) drawPath(d.astar, COLORS.astar, 2.5, []);
@@ -557,6 +628,7 @@
     setChips(st);
     logEvent(st.event);
     syncParams(st);
+    if (d.map_version !== undefined && d.map_version !== mapLayer.version) loadMap();
     scheduleDraw();
     state.frames++;
     const now = performance.now();
@@ -750,6 +822,18 @@
       if (input && paramState.dragging !== spec.name) input.value = v;
     }
   }
+
+  const saveMapBtn = $('btn-save-map');
+  if (saveMapBtn) saveMapBtn.onclick = async () => {
+    try {
+      const r = await fetch('/api/map/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'rmul_2025_slam' }),
+      });
+      const j = await r.json();
+      toast(j.ok ? `已保存：${j.prefix}` : (j.error || '保存失败'), !j.ok);
+    } catch (e) { toast('保存失败', true); }
+  };
 
   const resetBtn = $('btn-reset-params');
   if (resetBtn) resetBtn.onclick = async () => {

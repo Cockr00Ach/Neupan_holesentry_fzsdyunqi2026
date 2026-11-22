@@ -16,11 +16,13 @@ Topics it reads (published by ``neupan_ros2_bridge.py``)
     /neupan_global_path       nav_msgs/Path        A* path (when enabled)
     /dune_point_markers       visualization_msgs/MarkerArray
     /nrmp_point_markers       visualization_msgs/MarkerArray
+    /neupan_map               nav_msgs/OccupancyGrid  live SLAM map (web/map_builder.py)
 
 Topics it writes
     /goal_pose                geometry_msgs/PoseStamped   (click on the map)
     /neupan_cancel            std_msgs/Empty              ("stop" button)
     /neupan_set_params        std_msgs/String             (live planner tuning, JSON)
+    /neupan_save_map          std_msgs/String             (save the SLAM map, "保存地图")
 
 Run it standalone::
 
@@ -40,7 +42,7 @@ import numpy as np
 import rclpy
 from flask import Flask, Response, jsonify, request, send_from_directory
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -133,6 +135,11 @@ class WebBridge(Node):
 
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.cancel_pub = self.create_publisher(Empty, '/neupan_cancel', 10)
+        self.map_pub = None  # set below (kept for clarity)
+        self.save_map_pub = self.create_publisher(String, '/neupan_save_map', 10)
+        self.map_msg = None
+        self.map_version = 0
+        self.create_subscription(OccupancyGrid, '/neupan_map', self.on_map, 2)
         self.params_pub = self.create_publisher(String, '/neupan_set_params', 10)
         self.get_logger().info('web bridge ready')
 
@@ -184,6 +191,47 @@ class WebBridge(Node):
     def cancel(self):
         self.cancel_pub.publish(Empty())
         self.get_logger().info('web cancel')
+
+    def on_map(self, msg: OccupancyGrid):
+        self.map_msg = msg
+        self.map_version += 1
+        STORE.update(map_version=self.map_version)
+
+    def save_map(self, prefix: str):
+        msg = String()
+        msg.data = prefix
+        self.save_map_pub.publish(msg)
+        self.get_logger().info(f'web: save map -> {prefix}')
+
+    def map_snapshot(self, downsample=2):
+        """Downsampled map with run-length encoding (small enough for the browser)."""
+        if self.map_msg is None:
+            return None
+        info = self.map_msg.info
+        w, h = info.width, info.height
+        arr = np.array(self.map_msg.data, dtype=np.int8).reshape(h, w)
+        step = downsample if w >= 300 else 1
+        arr = arr[::step, ::step]
+        flat = arr.reshape(-1)
+        runs = []
+        prev = int(flat[0])
+        count = 1
+        for value in flat[1:]:
+            v = int(value)
+            if v == prev:
+                count += 1
+            else:
+                runs.append([prev, count])
+                prev, count = v, 1
+        runs.append([prev, count])
+        return {
+            'version': self.map_version,
+            'resolution': info.resolution * step,
+            'width': arr.shape[1],
+            'height': arr.shape[0],
+            'origin': [info.origin.position.x, info.origin.position.y],
+            'runs': runs,
+        }
 
     def set_params(self, payload: dict):
         msg = String()
@@ -271,6 +319,29 @@ def api_stop():
         return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
     NODE.cancel()
     return jsonify({'ok': True})
+
+
+@app.route('/api/map', methods=['GET'])
+def api_map():
+    if NODE is None:
+        return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
+    snap = NODE.map_snapshot()
+    if snap is None:
+        return jsonify({'ok': False, 'error': 'no map yet'}), 404
+    snap['ok'] = True
+    return jsonify(snap)
+
+
+@app.route('/api/map/save', methods=['POST'])
+def api_map_save():
+    if NODE is None:
+        return jsonify({'ok': False, 'error': 'ROS node not ready'}), 503
+    payload = request.get_json(silent=True) or {}
+    prefix = payload.get('prefix') or str(payload.get('name') or 'rmul_2025_slam')
+    if not os.path.isabs(prefix):
+        prefix = os.path.join(os.path.dirname(HERE), 'map', prefix)
+    NODE.save_map(prefix)
+    return jsonify({'ok': True, 'prefix': prefix})
 
 
 @app.route('/api/params', methods=['GET'])

@@ -662,14 +662,16 @@ class NeuPANBridge(Node):
 
         path = None
         source = 'straight line'
-        if self.use_local_planner and self.local_grid is not None:
-            path = self._local_plan(start_xy, goal_xy)
-            source = 'local A*'
-        if path is None and self.global_planner is not None:
+        # A static map (SLAM / map_server) is the strongest "global constraint": plan the
+        # whole route on it first and let the local grid only handle dynamic obstacles.
+        if self.global_planner is not None:
             path = self.global_planner.plan(start_xy, goal_xy)
-            source = 'global A*'
+            source = 'global A* (map)'
             if path:
                 path = list(path) + [list(goal_xy) + [0.0]]
+        if path is None and self.use_local_planner and self.local_grid is not None:
+            path = self._local_plan(start_xy, goal_xy)
+            source = 'local A*'
 
         if path:
             waypoints = [np.array([[x], [y], [yaw]]).reshape(3, 1) for x, y, yaw in path]

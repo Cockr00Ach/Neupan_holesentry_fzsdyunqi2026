@@ -7,6 +7,8 @@
 #   ./run_sim.sh --gui                # also open the Gazebo GUI (viewer only)
 #   ./run_sim.sh --wait               # do not follow planner.yaml, wait for /goal_pose
 #   ./run_sim.sh --web                # also serve the web view on 127.0.0.1:8088
+#   ./run_sim.sh --slam               # also build a 2D SLAM map (/neupan_map)
+#   ./run_sim.sh --gmap map/rmul_2025_slam.yaml   # plan globally on a saved map
 #   ./run_sim.sh --nav-only           # spawn the robots without the 1080p camera
 #                                     (real-time factor ~1.0 instead of ~0.7)
 #
@@ -29,8 +31,10 @@ START_BRIDGE=1
 START_REFEREE=0
 WAIT_FOR_GOAL=0
 START_WEB=0
+START_SLAM=0
 WEB_PORT=8088
 NAV_ONLY=0
+GLOBAL_MAP=""
 PLANNER_CONFIG=""
 
 while [ $# -gt 0 ]; do
@@ -43,6 +47,8 @@ while [ $# -gt 0 ]; do
         --referee) START_REFEREE=1; shift ;;
         --wait) WAIT_FOR_GOAL=1; shift ;;
         --web) START_WEB=1; shift ;;
+        --slam) START_SLAM=1; shift ;;
+        --gmap) GLOBAL_MAP=$2; shift 2 ;;
         --nav-only) NAV_ONLY=1; shift ;;
         --planner-config) PLANNER_CONFIG=$2; shift 2 ;;
         --web-port) WEB_PORT=$2; shift 2 ;;
@@ -148,6 +154,9 @@ if [ "$START_BRIDGE" = 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS -p planner_config:=$PLANNER_CONFIG"
     fi
     # extra ROS parameters for experiments, e.g. NEUPAN_BRIDGE_ARGS="-p local_inflation:=0.7"
+    if [ -n "$GLOBAL_MAP" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS -p use_global_planner:=true -p global_map:=$GLOBAL_MAP"
+    fi
     if [ -n "${NEUPAN_BRIDGE_ARGS:-}" ]; then
         EXTRA_ARGS="$EXTRA_ARGS $NEUPAN_BRIDGE_ARGS"
     fi
@@ -155,6 +164,13 @@ if [ "$START_BRIDGE" = 1 ]; then
         --params-file "$HERE/bridge_params.yaml" $EXTRA_ARGS \
         > "$LOG_DIR/neupan_bridge.log" 2>&1 &
     sleep 3
+fi
+
+# ---------------------------------------------------------------- slam
+if [ "$START_SLAM" = 1 ]; then
+    echo "      starting the SLAM map builder (/neupan_map)"
+    nohup python3 "$HERE/web/map_builder.py" > "$LOG_DIR/map_builder.log" 2>&1 &
+    sleep 1
 fi
 
 # ---------------------------------------------------------------- web
@@ -179,6 +195,7 @@ echo "  gazebo  pid $GAZEBO_PID   ($LOG_DIR/gazebo.log)"
 echo "  topics : /$ROBOT/chassis_odometry_gt /$ROBOT/livox/lidar"
 echo "  command: /$ROBOT/robot_base/chassis_cmd"
 echo "  web    : http://127.0.0.1:$WEB_PORT/   (with --web)"
+echo "  map    : /neupan_map   (with --slam;  save: ros2 topic pub --once /neupan_save_map ...)"
 echo "  goal   : ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \\"
 echo "             \"{header: {frame_id: map}, pose: {position: {x: 5.0, y: 0.0}}}\""
 echo

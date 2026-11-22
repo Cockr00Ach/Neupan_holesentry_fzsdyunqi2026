@@ -190,7 +190,42 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 * 网页端只读规划器话题、只写 `/goal_pose` 和 `/neupan_cancel`，不直接碰底盘，
   所以桥接不启动时它也能安全地空转。
 
-## 5. 验证结果
+## 5. SLAM 栅格地图（边跑边建图）
+
+桥接节点已经在发“滤掉地面、滤掉自车、地面坐标系”的障碍点云（`/neupan_obstacles`），
+配合里程计就足够建一张 2D 栅格图：`web/map_builder.py` 用射线投射做 free-space carving，
+log-odds 累积后发布标准 `nav_msgs/OccupancyGrid`（RViz / nav2 都能直接看），还能存成
+map_server 的 `pgm/yaml`，给全局 A* 用。
+
+![网页上的栅格地图](img/web_slam.png)
+
+```bash
+# 1) 一边跑一边建图（网页上会实时出现灰色墙体）
+./run_sim.sh --slam --web --nav-only
+#    让车跑一圈，或者在网页上点目标点跑几趟；地图会自动累积
+
+# 2) 网页“图层”卡片右上角点【保存地图】，或命令行：
+ros2 topic pub --once /neupan_save_map std_msgs/msg/String \
+  "{data: '$PWD/map/rmul_2025_slam'}"
+
+# 3) 带着地图跑：全局 A* 用这张图规划整条路线
+./run_sim.sh --web --wait --gmap map/rmul_2025_slam.yaml
+```
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/map` | 当前地图（下采样到 0.1 m、RLE 压缩，约 1k 段，前端一次性转成离屏画布） |
+| `POST /api/map/save` | `{"name": "rmul_2025_slam"}` → 保存到 `map/<name>.pgm/.yaml` |
+| `/neupan_map` | 实时 `OccupancyGrid`（0.05 m，480×480） |
+| `/neupan_save_map` | `String` 消息 = 保存前缀（绝对路径） |
+| `/neupan_reset_map` | `Empty`，清空地图 |
+
+实测（`rmul_2025` 场地，5 个位姿扫一遍）：1421 个占据格（0.05 m），墙体连续；
+在这张图上 A* `(-3,-2) → (4.5,2.5)` 得到 9.85 m 路径；把地图交给桥接后
+`(-5,3) → (4.5,2.5)` 走的是 **global A\* (map)** 的 30 点路线，13 s 到点。
+未知区域在全局规划里按“自由”处理（乐观假设），所以建图要跑够一圈。
+
+## 6. 验证结果
 
 以下都是本机实测（`rmul_2025` 场地，红方出生点 `(-5.0, 3.0)`）。
 
@@ -202,12 +237,13 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | 仿真动态绕障 | `./run_sim.sh --wait` 后 `python3 example/fzsd2026/test_sim_dynamic.py` | 蓝车停在红车路径 `(3.27,-0.61)`，红车 **18–28 s** 绕行到 `(5.5,-1.5)`，两车最小中心距 **0.56–1.81 m**（多次运行），PASS |
 | 仿真单目标点 | `./run_sim.sh --wait` 后 `test_sim_goal.py --goal -3 -2 0` | **5.4 s** 到点，3 s 后速度 0.000 m/s（确实停住） |
 | 目标不可达（场地死角） | `test_sim_goal.py --goal 5 -4.5 0` | 尝试 4 次侧向绕行后安全停车（不撞、不顶死），打印 `still in collision after the detours` |
+| SLAM 建图 + 全局规划 | `./run_sim.sh --slam --web` 扫一圈 → 保存 → `--gmap` 再跑 | 1421 个占据格（0.05 m）墙体连续；`(-5,3)→(4.5,2.5)` 走 **global A\* (map)** 的 30 点路线，13 s 到点 |
 | 网页端收发 | `./run_sim.sh --web` 后浏览器/`curl` | `/api/health` 正常；网页发目标 `(-3,-3)` → 机器人 12 s 内到点；`/api/stop` → 立刻 `idle`、速度 0、目标清空 |
 
 `test_sim_dynamic.py` 的判定：到达目标 **且** 两车中心距 > 0.55 m（对应盒模型不接触）。
 四个场景可以用 `./check_all.sh` 一次性复跑（结束后自动关掉仿真）。
 
-## 6. 测试脚本
+## 7. 测试脚本
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/fzsd2026/install/setup.bash
@@ -227,7 +263,7 @@ bash web/bench.sh qs4 /tmp/planner_qs4.yaml                       # 换配置跑
 `test_sim_goal.py` 会把轨迹写成 CSV（`--csv`，默认 `/tmp/neupan_goal_trace.csv`），
 `test_sim_dynamic.py` 打印最小中心距并给出 PASS/FAIL。
 
-## 7. NeuPAN 3D 改造说明（相对上游 1.3）
+## 8. NeuPAN 3D 改造说明（相对上游 1.3）
 
 哨兵车体近似为 0.6×0.5×0.5 m 的盒子，因此把 NeuPAN 的“2D 多边形机器人 + 2D 点云”
 扩展成“3D 盒子机器人 + 3D 点云”：
@@ -281,7 +317,7 @@ planner.train_dune()
 
 已用一个 3 维数据的小规模训练 + 续训烟囱测试验证过（`(32, 3)` 输入层、`model_0/2/4.pth`）。
 
-## 8. irsim 可视化演示（不依赖 ROS）
+## 9. irsim 可视化演示（不依赖 ROS）
 
 ```bash
 cd src/NeuPAN
@@ -292,7 +328,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 `env.yaml` 是仿真环境（障碍物、机器人初始位姿、目标点），`planner.yaml` 是规划器配置；
 两个 demo 都从机器人当前位姿到 `env.yaml` 的目标点生成参考路径。
 
-## 9. 已知限制 / 注意事项
+## 10. 已知限制 / 注意事项
 
 1. **宽障碍 / 偏离路径较大时的抽搐**：已经在桥接里加了“参考路径 A*（带 0.45 m 膨胀，窄于车宽的缝不进路径）+ 卡死检测 + 倒退脱困 + 靠近障碍自动降参考速度”，
    并且可以在网页端实时调 `q_s / eta / d_max / d_min` 观察效果（见第 4 节实测表）。仍无法通过时安全停车并报 `stuck (...)`。
@@ -322,7 +358,7 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
    位移 < 0.05 m）或安全停车时，用滚动栅格评估左右两侧净空，插入一个侧向中间航点绕行。
    `use_local_planner: true` 可改成持续用栅格 A* 生成参考路径（实验特性，容易抖动）。
 
-## 10. 修过的仿真侧问题
+## 11. 修过的仿真侧问题
 
 * `rmoss_gz_plugins/LightBarController` 原实现在应用灯光颜色时**删除并重建** `light_bar_visual`
   实体；Gazebo 6 的 Sensors 渲染线程会并发重建同名 visual，导致 headless 模式启动机器人时
@@ -330,10 +366,14 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
   headless 与 GUI 都稳定。改动在
   `src/fzsd2026_gazebo_simulator/rmoss_gazebo/rmoss_gz_plugins/plugins/light_bar_controller/LightBarController.cc`，
   需要 `colcon build --packages-select rmoss_gz_plugins`。
+* 如果 `colcon build --symlink-install` 对某个 Python 包报 `error: option --editable not
+  recognized`（本机 2026-11-21 之后 `sdformat_tools` 就中过这个），删掉该包的
+  `build/<pkg>` 和 `install/<pkg>` 再 `colcon build --packages-select <pkg>`（不加
+  `--symlink-install`）即可；否则 `spawn_robots` 会报 `ModuleNotFoundError: sdformat_tools`。
 * `run_sim.sh` 已把 `IGN_GAZEBO_RESOURCE_PATH` 补齐到 `fzsd2026_robot_description` 的
   `resource/models`，否则 `spawn_robots` 找不到 `model://rplidar_a2/...`。
 
-## 11. 文件清单
+## 12. 文件清单
 
 | 文件 | 说明 |
 | --- | --- |
@@ -345,6 +385,8 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
 | `build_map_from_lidar.py` | 用运行中的仿真扫描出 map_server 地图（实验性） |
 | `test_sim_twitch.py` | “两块板之间穿梭/原地抽搐”回归测试 |
 | `web/spawn_wall.py` | 在仿真里摆一面可调的墙（做宽障碍实验） |
+| `web/map_builder.py` | SLAM-lite：把 `/neupan_obstacles` 累积成栅格地图，发布/保存 |
+| `map/rmul_2025_slam.*` | 扫出来的场地地图（可直接 `--gmap` 使用） |
 | `web/bench.sh` / `web/analyse_run.py` | 换参数跑一轮 + 从 rosbag 统计轨迹质量 |
 | `local_grid.py` | 滚动占据栅格 + A*（卡死绕行方向评估 / 实验参考路径） |
 | `run_sim.sh` / `stop_sim.sh` | 一键启动 / 关闭 |
