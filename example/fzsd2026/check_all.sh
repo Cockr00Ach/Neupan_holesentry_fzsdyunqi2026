@@ -24,7 +24,12 @@ echo "=========== A: start-up route from planner.yaml ==========="
 bash stop_sim.sh >/dev/null 2>&1
 sleep 2
 bash run_sim.sh >/dev/null 2>&1
-sleep 28
+# the start-up route takes 10-15 s; poll instead of a fixed sleep (the first frames can
+# be late when the machine is busy)
+for _ in $(seq 1 45); do
+    sleep 1
+    grep -q "arrived" /tmp/neupan_run/neupan_bridge.log && break
+done
 if grep -q "arrived" /tmp/neupan_run/neupan_bridge.log; then
     echo "PASS: $(grep 'arrived' /tmp/neupan_run/neupan_bridge.log | tail -1)"
 else
