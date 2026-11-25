@@ -145,7 +145,7 @@ python3 example/fzsd2026/neupan_ros2_bridge.py --ros-args \
 | 状态条 | 状态（driving/idle/arrived/failed）、位姿、速度、最小障碍间距（<0.15 m 变红）、点数 / DUNE 点数 |
 | 事件 | 最近的目标、到点、卡死绕行、急停等事件 |
 | 交互 | 滚轮缩放、拖拽平移、`目标模式`（快捷键 G）后左键点地图设点、双击回中、`全览`、`跟随`（F）、`急停`（S） |
-| 规划参数 | 6 个滑条实时调 NeuPAN：`q_s`（贴路径程度）、`p_u`（速度代价）、`eta`（避障权重）、`d_max`/`d_min`（避障距离）、`ref_speed`（参考速度）；拖动立即生效，**恢复默认**按钮回到 `planner.yaml` 的值 |
+| 规划参数 | 6 个核心滑条实时调 NeuPAN：`q_s`、`p_u`、`eta`、`d_max`/`d_min`、`ref_speed`；展开 **高级参数** 还能调 `max_linear`、`max_angular`、`collision_threshold`、`goal_tolerance`、`local_inflation`、`slowdown_distance`、`min_ref_speed`、`replan_interval`、`max_path_deviation`、`speed_adapt`、`align_yaw`、`align_yaw_gain`（共 18 个）；拖动立即生效，**恢复默认**一键回到 yaml 的值 |
 
 ### 实时调参（为什么有用）
 
@@ -372,6 +372,17 @@ python3 example/fzsd2026/run_demo_interactive.py  # 右键点地图设置新目�
   recognized`（本机 2026-11-21 之后 `sdformat_tools` 就中过这个），删掉该包的
   `build/<pkg>` 和 `install/<pkg>` 再 `colcon build --packages-select <pkg>`（不加
   `--symlink-install`）即可；否则 `spawn_robots` 会报 `ModuleNotFoundError: sdformat_tools`。
+* **`MecanumDrive2` 的速度环坐标系错了**（这是“车动的有点异常”的根因之一）：
+  `components::LinearVelocity` 是**世界系**速度，而目标是**车体系**速度，原实现拿世界系速度
+  直接和车体系目标做差、再把力按车体系转到世界系 —— 只有在 yaw≈0 时才对。实测 yaw=90° 时
+  给 (0.5, 0) 指令车几乎不动（0.01 m），yaw=180° 时方向还反。现改为先把实测速度转回车体系
+  （`RotateVectorReverse`）再算误差，力/力矩仍按原样转到世界系。
+  > 顺带说明：NeuPAN 的 omni 模型在世界系积分（`state += dt·[v cosφ, v sinφ, 0]`），
+  > 所以它输出的 action 是**世界系**速度；桥接节点现在会按 -yaw 转成车体系再下发
+  > （之前只在 yaw≈0 时等价，所以没暴露）。
+* 车头朝向：加了 `align_yaw`（车头对准行进方向，默认 **关**）。打开后普通场景更“像开车”，
+  但在两块板之间的窄缝里会和避障互相打架（实测能到 31 s 或干脆绕丢），所以默认关，
+  需要“看起来自然”时在网页上临时开。
 * `run_sim.sh` 已把 `IGN_GAZEBO_RESOURCE_PATH` 补齐到 `fzsd2026_robot_description` 的
   `resource/models`，否则 `spawn_robots` 找不到 `model://rplidar_a2/...`。
 

@@ -204,6 +204,8 @@ class NeuPANBridge(Node):
         self.declare_parameter('max_recoveries', 8)
         self.declare_parameter('reverse_speed', 0.40)        # back-out speed [m/s]
         self.declare_parameter('speed_adapt', True)          # slow down near obstacles
+        self.declare_parameter('align_yaw', False)            # turn the chassis towards travel
+        self.declare_parameter('align_yaw_gain', 1.5)
         self.declare_parameter("min_ref_speed", 0.6)
         self.declare_parameter("slowdown_distance", 0.8)
 
@@ -254,6 +256,15 @@ class NeuPANBridge(Node):
         self.get_logger().info(f'loading NeuPAN config: {planner_config}')
         self.planner = neupan.init_from_yaml(planner_config)
         self.adjust_names = ('q_s', 'p_u', 'eta', 'd_max', 'd_min')
+        # other parameters that are safe to change at runtime
+        self.live_param_kinds = (
+            ('max_linear', float), ('max_angular', float),
+            ('collision_threshold', float), ('goal_tolerance', float),
+            ('local_inflation', float), ('slowdown_distance', float),
+            ('min_ref_speed', float), ('replan_interval', float),
+            ('max_path_deviation', float), ('speed_adapt', bool),
+            ('align_yaw', bool), ('align_yaw_gain', float),
+        )
         self.adjust_defaults = {}
         self.adjust_current = {}
         self.ref_speed_default = float(self.planner.ref_speed)
@@ -313,8 +324,24 @@ class NeuPANBridge(Node):
         self.max_recoveries = int(self.get_parameter('max_recoveries').value)
         self.reverse_speed = float(self.get_parameter('reverse_speed').value)
         self.speed_adapt = bool(self.get_parameter('speed_adapt').value)
+        self.align_yaw = bool(self.get_parameter('align_yaw').value)
+        self.align_yaw_gain = float(self.get_parameter('align_yaw_gain').value)
         self.min_ref_speed = float(self.get_parameter('min_ref_speed').value)
         self.slowdown_distance = float(self.get_parameter('slowdown_distance').value)
+        self.live_defaults = {
+            'max_linear': self.max_linear,
+            'max_angular': self.max_angular,
+            'collision_threshold': float(self.planner.collision_threshold),
+            'goal_tolerance': self.goal_tolerance,
+            'local_inflation': self.local_inflation,
+            'slowdown_distance': self.slowdown_distance,
+            'min_ref_speed': self.min_ref_speed,
+            'replan_interval': self.replan_interval,
+            'max_path_deviation': self.max_path_deviation,
+            'speed_adapt': self.speed_adapt,
+            'align_yaw': self.align_yaw,
+            'align_yaw_gain': self.align_yaw_gain,
+        }
         self.stuck_time = float(self.get_parameter('stuck_time').value)
         self.stuck_distance = float(self.get_parameter('stuck_distance').value)
         if self.use_local_grid and LocalGrid is None:
@@ -538,6 +565,9 @@ class NeuPANBridge(Node):
             return
         if payload.get('reset'):
             self._apply_params(dict(self.adjust_defaults), ref_speed=self.ref_speed_default)
+            self._apply_live_params(dict(getattr(self, 'live_defaults', {})))
+            self._last_event = 'parameters reset to the defaults'
+            self.get_logger().info('all planner parameters reset to the defaults')
             return
         values = {}
         for name in self.adjust_names:
@@ -548,6 +578,29 @@ class NeuPANBridge(Node):
                     continue
         ref_speed = payload.get('ref_speed')
         self._apply_params(values, ref_speed=float(ref_speed) if ref_speed is not None else None)
+        live = self._apply_live_params(payload)
+        if live:
+            shown = ', '.join(f'{k}={v:g}' if not isinstance(v, bool) else f'{k}={v}'
+                              for k, v in sorted(live.items()))
+            self._last_event = f'params updated: {shown}'
+            self.get_logger().info(f'live parameters: {shown}')
+
+    def _apply_live_params(self, payload):
+        changed = {}
+        for name, kind in self.live_param_kinds:
+            if name not in payload:
+                continue
+            raw = payload[name]
+            try:
+                value = bool(raw) if kind is bool else float(raw)
+            except (TypeError, ValueError):
+                continue
+            if name == 'collision_threshold':
+                self.planner.collision_threshold = float(value)
+            else:
+                setattr(self, name, value)
+            changed[name] = value
+        return changed
 
     def _apply_params(self, values, ref_speed=None):
         if values:
@@ -1074,6 +1127,22 @@ class NeuPANBridge(Node):
                                 for k, v in self.adjust_defaults.items()},
             'ref_speed': round(float(self.base_ref_speed), 2),
             'ref_speed_default': round(float(self.ref_speed_default), 2),
+            'live': {
+                'max_linear': round(float(self.max_linear), 2),
+                'max_angular': round(float(self.max_angular), 2),
+                'collision_threshold': round(float(self.planner.collision_threshold), 3),
+                'goal_tolerance': round(float(self.goal_tolerance), 2),
+                'local_inflation': round(float(self.local_inflation), 2),
+                'slowdown_distance': round(float(self.slowdown_distance), 2),
+                'min_ref_speed': round(float(self.min_ref_speed), 2),
+                'replan_interval': round(float(self.replan_interval), 2),
+                'max_path_deviation': round(float(self.max_path_deviation), 2),
+                'speed_adapt': bool(self.speed_adapt),
+                'align_yaw': bool(self.align_yaw),
+                'align_yaw_gain': round(float(self.align_yaw_gain), 2),
+            },
+            'live_defaults': {k: (bool(v) if isinstance(v, bool) else round(float(v), 3))
+                              for k, v in getattr(self, 'live_defaults', {}).items()},
         }
 
     def publish_status(self):
@@ -1115,7 +1184,10 @@ class NeuPANBridge(Node):
         if self._escape:
             if time.time() < self._escape['until']:
                 # open-loop back-out: NeuPAN cannot help while the robot is wedged
-                self._publish_action(np.array([[self._escape['vx']], [self._escape['vy']]]))
+                yaw = float(self.robot_state[2, 0])
+                speed = float(self._escape['vx'])       # negative = backwards
+                self._publish_action(np.array([[speed * math.cos(yaw)],
+                                               [speed * math.sin(yaw)]]))
                 self._broadcast_robot_tf()
                 return
             self._escape = None
@@ -1195,16 +1267,37 @@ class NeuPANBridge(Node):
                 f'v=({self._last_action[0]:.2f}, {self._last_action[1]:.2f})')
 
     def _publish_action(self, action: np.ndarray):
+        """Publish the planner action.
+
+        NeuPAN's omni model integrates ``state += dt * [v cos(phi), v sin(phi), 0]`` in the
+        *world* frame, i.e. the action is a world-frame velocity, while ChassisCmd wants a
+        chassis-frame velocity.  Rotating it by -yaw is therefore required (it used to be
+        a no-op only because the robot always drove with yaw ~ 0).
+        """
         self._cmd_history.append((time.time(), float(action[0, 0]),
                                   float(action[1, 0]) if action.shape[0] > 1 else 0.0))
         cmd = ChassisCmd()
         cmd.type = ChassisCmd.VELOCITY
         if self.omni:
-            vx = float(np.clip(action[0, 0], -self.max_linear, self.max_linear))
-            vy = float(np.clip(action[1, 0], -self.max_linear, self.max_linear))
+            yaw = float(self.robot_state[2, 0]) if self.robot_state is not None else 0.0
+            c, s = math.cos(yaw), math.sin(yaw)
+            world = np.array([float(action[0, 0]), float(action[1, 0])])
+            body = np.array([c * world[0] + s * world[1],
+                             -s * world[0] + c * world[1]])
+            vx = float(np.clip(body[0], -self.max_linear, self.max_linear))
+            vy = float(np.clip(body[1], -self.max_linear, self.max_linear))
             cmd.twist.linear.x = vx
             cmd.twist.linear.y = vy
             self._last_action = (vx, vy)
+            # A mecanum robot that never turns looks like it is sliding sideways (and the
+            # sim's lateral PID is much softer than the longitudinal one).  Turn the
+            # chassis towards the direction of travel so the motion looks like driving.
+            speed = math.hypot(world[0], world[1])
+            if self.align_yaw and speed > 0.15:
+                target_yaw = math.atan2(world[1], world[0])
+                err = math.atan2(math.sin(target_yaw - yaw), math.cos(target_yaw - yaw))
+                cmd.twist.angular.z = float(np.clip(self.align_yaw_gain * err,
+                                                    -self.max_angular, self.max_angular))
         else:
             vx = float(np.clip(action[0, 0], -self.max_linear, self.max_linear))
             wz = float(np.clip(action[1, 0], -self.max_angular, self.max_angular))

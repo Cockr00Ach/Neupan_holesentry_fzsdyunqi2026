@@ -46,7 +46,11 @@ neupan_bridge:
     max_path_deviation: 2.0    # 偏离参考路径超过这个距离才重新锚定
     max_recoveries: 8          # 连续“卡死/抽搐”的恢复尝试上限
     reverse_speed: 0.40        # 卡在缝里时倒退脱困的速度
-    speed_adapt: true          # 靠近障碍自动降参考速度
+    speed_adapt: true
+    # 车头朝向行进方向：默认关（打开后会在窄缝里和避障打架，测过更慢/更不稳）
+    align_yaw: false
+    align_yaw_gain: 1.5
+    # 靠近障碍自动降参考速度（speed_adapt）
     min_ref_speed: 0.6
     slowdown_distance: 0.8
 

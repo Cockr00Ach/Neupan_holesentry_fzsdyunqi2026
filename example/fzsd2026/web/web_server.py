@@ -57,18 +57,47 @@ STATIC = os.path.join(HERE, 'static')
 # Live-tunable NeuPAN parameters: name, label, range and what it does. Served to the
 # UI so the sliders and the topic share one definition.
 PARAM_SPECS = [
+    # ---- core (always visible) -------------------------------------------
     {'name': 'q_s', 'label': 'q_s 路径跟踪权重', 'min': 0.1, 'max': 20.0, 'step': 0.1,
-     'hint': '越大越贴着参考路径走（太小会绕圈，太大会卡在障碍前）'},
+     'group': 'core', 'hint': '越大越贴着参考路径走（太小会绕圈，太大会卡在障碍前）'},
     {'name': 'p_u', 'label': 'p_u 速度代价', 'min': 0.1, 'max': 5.0, 'step': 0.1,
-     'hint': '越大越倾向于减速'},
+     'group': 'core', 'hint': '越大越倾向于减速'},
     {'name': 'eta', 'label': 'eta 避障权重', 'min': 1.0, 'max': 40.0, 'step': 0.5,
-     'hint': '越大越保守，离障碍越远'},
+     'group': 'core', 'hint': '越大越保守，离障碍越远'},
     {'name': 'd_max', 'label': 'd_max 避障作用距离 [m]', 'min': 0.15, 'max': 1.5,
-     'step': 0.05, 'hint': '障碍进入这个距离就开始干预'},
+     'step': 0.05, 'group': 'core', 'hint': '障碍进入这个距离就开始干预'},
     {'name': 'd_min', 'label': 'd_min 允许最小距离 [m]', 'min': 0.01, 'max': 0.5,
-     'step': 0.01, 'hint': '碰撞约束的软下界'},
+     'step': 0.01, 'group': 'core', 'hint': '碰撞约束的软下界'},
     {'name': 'ref_speed', 'label': 'ref_speed 参考速度 [m/s]', 'min': 0.3, 'max': 3.0,
-     'step': 0.1, 'hint': '参考路径的速度上限（靠近障碍时会自动降速叠加）'},
+     'step': 0.1, 'group': 'core', 'hint': '参考路径速度（靠近障碍时自动降速叠加）'},
+    # ---- advanced --------------------------------------------------------
+    {'name': 'max_linear', 'label': 'max_linear 速度上限 [m/s]', 'min': 0.2, 'max': 3.0,
+     'step': 0.1, 'group': 'advanced', 'hint': '实际下发速度的钳位'},
+    {'name': 'max_angular', 'label': 'max_angular 角速度上限 [rad/s]', 'min': 0.2,
+     'max': 6.28, 'step': 0.1, 'group': 'advanced', 'hint': '仅差速底盘用'},
+    {'name': 'collision_threshold', 'label': 'collision_threshold 停车阈值 [m]',
+     'min': 0.0, 'max': 0.5, 'step': 0.01, 'group': 'advanced',
+     'hint': '最小间距小于它就触发安全停车'},
+    {'name': 'goal_tolerance', 'label': 'goal_tolerance 到点半径 [m]', 'min': 0.1,
+     'max': 1.0, 'step': 0.05, 'group': 'advanced', 'hint': '判定“到达”的距离'},
+    {'name': 'local_inflation', 'label': 'local_inflation 参考路径净空 [m]', 'min': 0.2,
+     'max': 1.0, 'step': 0.05, 'group': 'advanced',
+     'hint': 'A* 膨胀半径：比这窄的缝不会进参考路径（立刻生效，只影响新规划）'},
+    {'name': 'slowdown_distance', 'label': 'slowdown_distance 降速距离 [m]', 'min': 0.2,
+     'max': 3.0, 'step': 0.1, 'group': 'advanced', 'hint': '离障碍多近开始降参考速度'},
+    {'name': 'min_ref_speed', 'label': 'min_ref_speed 最低参考速度 [m/s]', 'min': 0.2,
+     'max': 2.0, 'step': 0.1, 'group': 'advanced', 'hint': '降速的下限'},
+    {'name': 'replan_interval', 'label': 'replan_interval 重规划间隔 [s]', 'min': 0.2,
+     'max': 3.0, 'step': 0.1, 'group': 'advanced', 'hint': '两次重规划的最小间隔'},
+    {'name': 'max_path_deviation', 'label': 'max_path_deviation 重锚定偏差 [m]',
+     'min': 0.3, 'max': 5.0, 'step': 0.1, 'group': 'advanced',
+     'hint': '偏离参考路径超过它就重新锚定'},
+    {'name': 'speed_adapt', 'label': 'speed_adapt 靠近障碍自动降速', 'type': 'bool',
+     'group': 'advanced', 'hint': '关掉则固定用 ref_speed'},
+    {'name': 'align_yaw', 'label': 'align_yaw 车头朝向行进方向', 'type': 'bool',
+     'group': 'advanced', 'hint': '关掉则只平移不转向（麦轮侧滑）'},
+    {'name': 'align_yaw_gain', 'label': 'align_yaw_gain 转向增益', 'min': 0.2, 'max': 5.0,
+     'step': 0.1, 'group': 'advanced', 'hint': '车头对准行进方向的快慢'},
 ]
 
 
@@ -367,10 +396,16 @@ def api_map_load():
 @app.route('/api/params', methods=['GET'])
 def api_params_get():
     status = STORE.snapshot().get('status', {})
+    current = dict(status.get('adjust', {}))
+    current.update(status.get('live', {}))
+    defaults = dict(status.get('adjust_defaults', {}))
+    defaults.update(status.get('live_defaults', {}))
+    current['ref_speed'] = status.get('ref_speed')
+    defaults['ref_speed'] = status.get('ref_speed_default')
     return jsonify({
         'specs': PARAM_SPECS,
-        'current': status.get('adjust', {}),
-        'defaults': status.get('adjust_defaults', {}),
+        'current': current,
+        'defaults': defaults,
         'ref_speed': status.get('ref_speed'),
         'ref_speed_default': status.get('ref_speed_default'),
     })
@@ -388,6 +423,9 @@ def api_params_set():
     for spec in PARAM_SPECS:
         name = spec['name']
         if name not in payload:
+            continue
+        if spec.get('type') == 'bool':
+            values[name] = bool(payload[name])
             continue
         try:
             value = float(payload[name])

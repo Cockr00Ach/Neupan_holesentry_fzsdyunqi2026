@@ -760,39 +760,73 @@
       paramState.specs = j.specs || [];
       paramState.current = j.current || {};
       paramState.defaults = j.defaults || {};
-      if (j.ref_speed !== undefined && j.ref_speed !== null) {
-        paramState.current.ref_speed = j.ref_speed;
-        paramState.defaults.ref_speed = j.ref_speed_default;
-      }
       buildParamPanel();
     } catch (e) { /* server not ready yet */ }
+  }
+
+  function paramRow(spec) {
+    const wrap = document.createElement('div');
+    wrap.className = 'param';
+    const value = paramState.current[spec.name];
+    if (spec.type === 'bool') {
+      wrap.innerHTML = `
+        <label title="${spec.hint || ''}" style="cursor:pointer">
+          <span>${spec.label}</span>
+          <input type="checkbox" id="pc-${spec.name}" style="accent-color:var(--accent)">
+        </label>`;
+      const box = wrap.querySelector('input');
+      box.checked = value === undefined ? true : !!value;
+      box.onchange = () => {
+        paramState.pending[spec.name] = box.checked;
+        clearTimeout(paramState.timer);
+        paramState.timer = setTimeout(flushParams, 120);
+      };
+      return wrap;
+    }
+    const shown = (value === undefined || value === null) ? '--' : Number(value).toFixed(2);
+    wrap.innerHTML = `
+      <label title="${spec.hint || ''}"><span>${spec.label}</span><b id="pv-${spec.name}">${shown}</b></label>
+      <input type="range" id="ps-${spec.name}" data-param="${spec.name}"
+             min="${spec.min}" max="${spec.max}" step="${spec.step}"
+             value="${value === undefined || value === null ? spec.min : value}">`;
+    const input = wrap.querySelector('input');
+    input.addEventListener('pointerdown', () => { paramState.dragging = spec.name; });
+    input.addEventListener('pointerup', () => { paramState.dragging = null; });
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      $('pv-' + spec.name).textContent = v.toFixed(2);
+      paramState.pending[spec.name] = v;
+      clearTimeout(paramState.timer);
+      paramState.timer = setTimeout(flushParams, 180);
+    });
+    return wrap;
   }
 
   function buildParamPanel() {
     const host = $('params');
     if (!host || host.dataset.built === '1') return;
     host.dataset.built = '1';
-    for (const spec of paramState.specs) {
-      const wrap = document.createElement('div');
-      wrap.className = 'param';
-      const value = paramState.current[spec.name];
-      const shown = (value === undefined || value === null) ? '--' : Number(value).toFixed(2);
-      wrap.innerHTML = `
-        <label title="${spec.hint || ''}"><span>${spec.label}</span><b id="pv-${spec.name}">${shown}</b></label>
-        <input type="range" id="ps-${spec.name}" data-param="${spec.name}"
-               min="${spec.min}" max="${spec.max}" step="${spec.step}"
-               value="${value === undefined || value === null ? spec.min : value}">`;
-      host.appendChild(wrap);
-      const input = wrap.querySelector('input');
-      input.addEventListener('pointerdown', () => { paramState.dragging = spec.name; });
-      input.addEventListener('pointerup', () => { paramState.dragging = null; });
-      input.addEventListener('input', () => {
-        const v = parseFloat(input.value);
-        $('pv-' + spec.name).textContent = v.toFixed(2);
-        paramState.pending[spec.name] = v;
-        clearTimeout(paramState.timer);
-        paramState.timer = setTimeout(flushParams, 180);
-      });
+    const core = paramState.specs.filter(s => (s.group || 'core') === 'core');
+    const advanced = paramState.specs.filter(s => s.group === 'advanced');
+    for (const spec of core) host.appendChild(paramRow(spec));
+    if (advanced.length) {
+      const toggle = document.createElement('button');
+      toggle.className = 'btn-mini';
+      toggle.textContent = `高级参数（${advanced.length}）`;
+      toggle.style.marginTop = '4px';
+      const box = document.createElement('div');
+      box.className = 'params';
+      box.style.display = 'none';
+      box.style.marginTop = '6px';
+      for (const spec of advanced) box.appendChild(paramRow(spec));
+      toggle.onclick = () => {
+        const open = box.style.display !== 'none';
+        box.style.display = open ? 'none' : 'flex';
+        toggle.textContent = open ? `高级参数（${advanced.length}）`
+                                  : `收起高级参数（${advanced.length}）`;
+      };
+      host.appendChild(toggle);
+      host.appendChild(box);
     }
   }
 
@@ -811,11 +845,16 @@
   }
 
   function syncParams(st) {
-    const adjust = (st.adjust || {});
-    adjust.ref_speed = st.ref_speed;
+    const values = Object.assign({}, st.adjust || {}, st.live || {});
+    if (st.ref_speed !== undefined) values.ref_speed = st.ref_speed;
     for (const spec of paramState.specs) {
-      const v = adjust[spec.name];
+      const v = values[spec.name];
       if (v === undefined || v === null) continue;
+      if (spec.type === 'bool') {
+        const box = $('pc-' + spec.name);
+        if (box) box.checked = !!v;
+        continue;
+      }
       const label = $('pv-' + spec.name);
       if (label) label.textContent = Number(v).toFixed(2);
       const input = $('ps-' + spec.name);
