@@ -12,6 +12,7 @@ centre distance below ~0.55 m means contact).
 """
 import argparse
 import math
+import subprocess
 import sys
 import time
 
@@ -72,6 +73,31 @@ class DynamicTest(Node):
         self.start_time = time.time()
         print(f'[test] red goal ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
 
+    def place_blocker(self, x, y):
+        subprocess.run(['ign', 'service', '-s', '/world/default/set_pose',
+                        '--reqtype', 'ignition.msgs.Pose',
+                        '--reptype', 'ignition.msgs.Boolean',
+                        '--timeout', '3000', '--req',
+                        f'name: "blue_standard_robot1", position: {{x: {x}, y: {y}, z: 0.28}}, '
+                        'orientation: {w: 1.0}'], capture_output=True, timeout=20)
+
+    def hold_blocker(self):
+        """Position-hold the parked robot (the sim has no brake: it would drift)."""
+        if self.blue is None:
+            return
+        dx = self.blocker_goal[0] - self.blue[0]
+        dy = self.blocker_goal[1] - self.blue[1]
+        dist = math.hypot(dx, dy)
+        cmd = Twist()
+        if dist > 0.05:
+            gain = min(0.8, 0.9 * dist)
+            yaw = self.blue[2]
+            c, s = math.cos(-yaw), math.sin(-yaw)
+            vx, vy = gain * dx / dist, gain * dy / dist
+            cmd.linear.x = c * vx - s * vy
+            cmd.linear.y = s * vx + c * vy
+        self.blue_pub.publish(cmd)
+
     def drive_blocker(self):
         if self.blue is None:
             return
@@ -104,17 +130,12 @@ def main():
     print(f'[test] red start {tuple(round(v, 2) for v in node.red)}, '
           f'blue start {tuple(round(v, 2) for v in node.blue)}')
 
-    # phase 1: park the blue robot in the red robot's way
-    print('[test] moving the blue robot into the red robot\'s path...')
-    t0 = time.time()
-    while time.time() - t0 < 25.0:
-        node.drive_blocker()
-        rclpy.spin_once(node, timeout_sec=0.02)
-        if node.blue is not None and math.hypot(
-                node.blue[0] - args.blocker_goal[0],
-                node.blue[1] - args.blocker_goal[1]) < 0.3:
-            break
-    node.blue_pub.publish(Twist())
+    # phase 1: park the blue robot in the red robot's way (teleport: deterministic)
+    print('[test] placing the blue robot in the red robot\'s path...')
+    node.place_blocker(args.blocker_goal[0], args.blocker_goal[1])
+    time.sleep(1.0)
+    for _ in range(20):
+        rclpy.spin_once(node, timeout_sec=0.05)
     print(f'[test] blue parked at {tuple(round(v, 2) for v in node.blue)}, '
           f'red at {tuple(round(v, 2) for v in node.red)}')
 
@@ -124,6 +145,7 @@ def main():
     deadline = time.time() + args.timeout
     reached = False
     while time.time() < deadline:
+        node.hold_blocker()
         rclpy.spin_once(node, timeout_sec=0.02)
         if node.red is None:
             continue
