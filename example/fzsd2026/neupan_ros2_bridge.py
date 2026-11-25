@@ -831,10 +831,26 @@ class NeuPANBridge(Node):
         """True if an obstacle is now observed on the reference path ahead."""
         if self.local_grid is None or self.planner.initial_path is None:
             return False
+        now = time.time()
+        if now - getattr(self, '_blocked_check_at', 0.0) < 0.25:   # 4 Hz is plenty
+            return False
+        self._blocked_check_at = now
         path = self.planner.initial_path
         start_idx = getattr(self.planner.ipath, 'point_index', 0)
         # a slightly smaller inflation here: the path may legitimately hug an obstacle
         inflation = max(0.2, self.local_inflation * 0.75)
+        # one vectorised query instead of one distance transform per path point
+        sample = [pt for pt in path[start_idx:start_idx + 80]]
+        if sample:
+            xy = [(float(pt[0, 0]), float(pt[1, 0])) for pt in sample]
+            free = self.local_grid.free_mask(xy, inflation)
+            rx, ry = float(self.robot_state[0, 0]), float(self.robot_state[1, 0])
+            for (x, y), is_free in zip(xy, free):
+                if math.hypot(x - rx, y - ry) < 0.8 or math.hypot(x - rx, y - ry) > 5.0:
+                    continue
+                if not is_free:
+                    return True
+            return False
         for pt in path[start_idx:start_idx + 80]:
             distance = math.hypot(pt[0, 0] - self.robot_state[0, 0],
                                   pt[1, 0] - self.robot_state[1, 0])
@@ -898,6 +914,11 @@ class NeuPANBridge(Node):
         moved = math.hypot(self.robot_state[0, 0] - oldest[1],
                            self.robot_state[1, 0] - oldest[2])
         oscillating = self._is_oscillating(now)
+        if commanded > 0.2 and moved < 0.3:
+            self.get_logger().info(
+                f'progress: commanded {commanded:.2f} m/s, moved {moved:.3f} m '
+                f'in {self.stuck_time:.1f} s, oscillating={oscillating}',
+                throttle_duration_sec=2.0)
         if commanded > 0.2 and (moved < self.stuck_distance or oscillating):
             if self._stuck_since is None:
                 self._stuck_since = now
@@ -928,16 +949,71 @@ class NeuPANBridge(Node):
         if try_reverse and self._start_reverse_escape():
             self._last_event = f'reversing out ({kind}, try {self._recoveries})'
             return
+        if self._lateral_escape():
+            self._last_event = f'lateral escape ({kind}, try {self._recoveries})'
+            return
         if self._update_reference_path(reason=f'recover/{kind}', force=True):
             self._last_event = f'replanned around the obstacle ({kind})'
-        elif self._try_detour():
-            self._last_event = f'lateral detour ({kind})'
         elif deviation > self.max_path_deviation:
             self.planner.update_initial_path_from_goal(self.robot_state, self.goal)
             self.planner.reset()
             self._last_event = f'reference re-anchored ({kind})'
         else:
             self._last_event = f'no path around the obstacle ({kind})'
+
+    def _lateral_escape(self):
+        """Drive to the free direction with the most room (last-resort unstick).
+
+        When the robot is pinned against a wall and both the replan and the reverse
+        escape are refused, a short reference segment towards open space gets it out of
+        the corner; the goal is replanned as soon as that segment is reached.
+        """
+        if self.local_grid is None or self.robot_state is None:
+            return False
+        x, y = float(self.robot_state[0, 0]), float(self.robot_state[1, 0])
+        goal_bearing = None
+        if self.goal is not None:
+            goal_bearing = math.atan2(float(self.goal[1, 0]) - y, float(self.goal[0, 0]) - x)
+        inflation = max(0.2, self.local_inflation * 0.6)
+        best = None
+        for i in range(24):
+            angle = i * (2.0 * math.pi / 24.0)
+            for dist in (2.0, 1.5, 1.1, 0.8):
+                target = (x + dist * math.cos(angle), y + dist * math.sin(angle))
+                if not self.local_grid.free_mask([target], inflation)[0]:
+                    continue
+                # prefer directions that are clear along the whole segment and roughly
+                # towards the goal
+                steps = max(3, int(dist / 0.25))
+                samples = [(x + dist * t / steps * math.cos(angle),
+                            y + dist * t / steps * math.sin(angle))
+                           for t in range(1, steps + 1)]
+                if not all(self.local_grid.free_mask(samples, inflation)):
+                    continue
+                score = dist
+                if goal_bearing is not None:
+                    diff = abs(math.atan2(math.sin(angle - goal_bearing),
+                                          math.cos(angle - goal_bearing)))
+                    score += 1.5 * math.cos(diff)
+                if best is None or score > best[0]:
+                    best = (score, target, angle)
+                break
+        if best is None:
+            return False
+        _score, target, angle = best
+        waypoints = [
+            np.array([[x], [y], [float(self.robot_state[2, 0])]]).reshape(3, 1),
+            np.array([[target[0]], [target[1]], [angle]]).reshape(3, 1),
+        ]
+        self.planner.update_initial_path_from_waypoints(waypoints)
+        self.planner.reset()
+        self.arrived = False
+        if self.vis:
+            self._publish_path(self.global_path_pub, waypoints)
+        self.get_logger().info(
+            f'lateral escape: {math.hypot(target[0] - x, target[1] - y):.2f} m towards '
+            f'{math.degrees(angle):+.0f} deg')
+        return True
 
     def _start_reverse_escape(self):
         """Back out of a narrow slot for a moment (NeuPAN cannot un-wedge a robot)."""
@@ -1154,6 +1230,16 @@ class NeuPANBridge(Node):
     # Control loop
     # ------------------------------------------------------------------ #
     def control_loop(self):
+        try:
+            self._control_loop()
+        except Exception as exc:  # keep driving/planning even if one cycle fails
+            self._control_errors = getattr(self, '_control_errors', 0) + 1
+            self.get_logger().error(
+                f'control loop error #{self._control_errors}: {exc!r}',
+                throttle_duration_sec=2.0)
+            self._publish_stop()
+
+    def _control_loop(self):
         if self.robot_state is None:
             self.get_logger().info('waiting for odometry...', throttle_duration_sec=2.0)
             return
@@ -1244,11 +1330,8 @@ class NeuPANBridge(Node):
             elif (time.time() - self._stop_since) > 0.5:
                 self._stop_since = None
                 if self.goal is not None:
-                    if not self._try_detour():
-                        self.failed = True
-                        self.get_logger().warn(
-                            'still in collision after the detours; stopping (send a new '
-                            'goal to retry)', throttle_duration_sec=2.0)
+                    # pinned next to an obstacle: back out / go to the free direction
+                    self._recover('safety stop')
         else:
             self._stop_since = None
             self._publish_action(action)

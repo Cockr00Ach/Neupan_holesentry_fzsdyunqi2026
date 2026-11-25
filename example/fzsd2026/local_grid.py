@@ -52,6 +52,8 @@ class LocalGrid:
 
         self.last_seen = np.full(self.height * self.width, -1e9, dtype=np.float32)
         self._stamp = 0.0
+        self._version = 0
+        self._infl_cache = {}
         self._clearance_cache = None
         self._clearance_stamp = None
 
@@ -89,6 +91,7 @@ class LocalGrid:
             return
         idx = gy[valid] * self.width + gx[valid]
         np.maximum.at(self.last_seen, idx, np.float32(self._stamp))
+        self._version += 1
 
     # ------------------------------------------------------------------ #
     # Occupancy / clearance
@@ -99,13 +102,39 @@ class LocalGrid:
         return (now - self.last_seen) < self.decay
 
     def inflated_occupancy(self, inflation_radius, stamp=None):
-        """Occupancy dilated by ``inflation_radius`` metres (robot radius + margin)."""
+        """Occupancy dilated by ``inflation_radius`` metres (robot radius + margin).
+
+        The distance transform costs ~4 ms on a 400x400 grid, so the result is cached
+        until the grid changes - calling this per path point (as the "is the reference
+        blocked?" check used to) starved the 50 Hz control loop.
+        """
+        key = (round(float(inflation_radius), 3), self._version,
+               None if stamp is None else round(float(stamp), 3))
+        cached = self._infl_cache.get(key)
+        if cached is not None:
+            return cached
         occ = self.occupied(stamp).reshape(self.height, self.width)
         if ndimage is None or inflation_radius <= 0:
+            self._infl_cache = {key: occ}
             return occ
         cells = max(1.0, inflation_radius / self.resolution)
         dist = ndimage.distance_transform_edt(~occ)
-        return occ | (dist < cells)
+        grid = occ | (dist < cells)
+        self._infl_cache = {key: grid}
+        return grid
+
+    def free_mask(self, points_xy, inflation_radius=0.4):
+        """Vectorised "are these world points free?" test (uses the cached grid)."""
+        grid = self.inflated_occupancy(inflation_radius)
+        pts = np.asarray(points_xy, dtype=float)
+        if pts.size == 0:
+            return np.zeros((0,), dtype=bool)
+        gx = np.floor((pts[:, 0] - self.origin[0]) / self.resolution).astype(np.int64)
+        gy = np.floor((pts[:, 1] - self.origin[1]) / self.resolution).astype(np.int64)
+        ok = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
+        free = np.zeros(len(pts), dtype=bool)
+        free[ok] = ~grid[gy[ok], gx[ok]]
+        return free
 
     # ------------------------------------------------------------------ #
     # A*

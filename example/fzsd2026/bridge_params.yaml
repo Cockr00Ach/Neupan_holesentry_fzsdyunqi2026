@@ -12,7 +12,7 @@ neupan_bridge:
     # NeuPAN planner config (relative paths are resolved against this file's directory)
     planner_config: 'planner.yaml'
 
-    control_rate: 50.0
+    control_rate: 40.0
     publish_visualization: true
     # 发布频率：状态给网页/脚本，轨迹和标记给 RViz/网页，点云给 NeuPAN
     status_rate: 20.0
@@ -29,7 +29,7 @@ neupan_bridge:
     # point cloud preprocessing
     lidar_height: 0.44        # lidar height above the floor [m]; 0 = auto-detect
     ground_clearance: 0.06    # drop points lower than this above the floor
-    max_points: 600
+    max_points: 450
     self_filter_margin: 0.10
     max_range: 12.0
 
