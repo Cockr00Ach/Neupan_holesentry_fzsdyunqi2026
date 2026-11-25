@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "tool": "tools/benchmark_decision.py",
+  "recorded_on": "2026-11-18",
+  "policy": "rule",
+  "environment": {
+    "python": "3.12.3",
+    "numpy": "2.5.4",
+    "machine": "x86_64",
+    "processor": "x86_64",
+    "cpu_count": 28
+  },
+  "max_rss_kib": 82336,
+  "results": {
+    "demo": {
+      "steps": 200,
+      "setup_ms": 0.28355600079521537,
+      "step_wall_ms": {
+        "p50": 0.9774565041880123,
+        "p95": 1.5561547937977593,
+        "max": 2.1691560104954988,
+        "mean": 1.060599995253142
+      },
+      "step_cpu_ms": {
+        "p50": 0.9775074999999883,
+        "p95": 1.5566070499999918,
+        "max": 2.1685780000000046,
+        "mean": 1.0608707100000012
+      },
+      "cpu_share_at_2hz": 0.0021217414200000026,
+      "tracemalloc_peak_kib": 1328.4912109375,
+      "tasks": {
+        "INTERCEPT": 200
+      },
+      "postures": {
+        "attack": 200
+      },
+      "spin_steps": 200,
+      "obstacles": 1,
+      "graph_corners": 4
+    },
+    "rmuc2027": {
+      "steps": 200,
+      "setup_ms": 120.03445900336374,
+      "step_wall_ms": {
+        "p50": 3.1119920022320002,
+        "p95": 17.10164465257547,
+        "max": 50.45535600220319,
+        "mean": 6.738034925074317
+      },
+      "step_cpu_ms": {
+        "p50": 3.110524999999864,
+        "p95": 17.102627150000266,
+        "max": 50.45516900000013,
+        "mean": 6.737350854999995
+      },
+      "cpu_share_at_2hz": 0.013474701709999991,
+      "tracemalloc_peak_kib": 3791.201171875,
+      "tasks": {
+        "INTERCEPT": 200
+      },
+      "postures": {
+        "attack": 200
+      },
+      "spin_steps": 200,
+      "obstacles": 77,
+      "graph_corners": 149
+    },
+    "rmuc2026": {
+      "steps": 200,
+      "setup_ms": 45.13889399822801,
+      "step_wall_ms": {
+        "p50": 2.9874079991714098,
+        "p95": 10.45934473950183,
+        "max": 29.29486200446263,
+        "mean": 4.536474349661148
+      },
+      "step_cpu_ms": {
+        "p50": 2.9879514999997525,
+        "p95": 10.460500150000396,
+        "max": 29.294881000000217,
+        "mean": 4.536955689999945
+      },
+      "cpu_share_at_2hz": 0.00907391137999989,
+      "tracemalloc_peak_kib": 2098.5654296875,
+      "tasks": {
+        "INTERCEPT": 200
+      },
+      "postures": {
+        "attack": 200
+      },
+      "spin_steps": 200,
+      "obstacles": 62,
+      "graph_corners": 113
+    }
+  },
+  "limitations": "Synthetic tracks on the tactical map; Nav2, ROS transport and real sensor load are not included."
+}

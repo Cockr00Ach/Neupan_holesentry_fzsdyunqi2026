@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NeuPAN · fzsd2026 哨兵</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #151b24;
+    --panel-2: #1b2330;
+    --line: #243041;
+    --text: #dbe3ee;
+    --muted: #8b97a8;
+    --accent: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --blue: #3b82f6;
+    --cloud: #ffb04a;
+    --dune: #b06cff;
+    --nrmp: #ff7a45;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 8px 14px;
+    background: linear-gradient(180deg, #18202b, #121821);
+    border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  .brand { font-weight: 700; letter-spacing: .4px; }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .chip {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 10px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .chip b { color: #fff; font-weight: 600; }
+  .chip.mode-driving b { color: var(--accent); }
+  .chip.mode-failed b { color: var(--bad); }
+  .chip.mode-idle b, .chip.mode-arrived b { color: var(--warn); }
+  .btns { display: flex; gap: 8px; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: #3a4a63; }
+  button.active { background: #12352a; border-color: var(--accent); color: #b7f7cf; }
+  button.danger { border-color: #5b2530; color: #ffb3bf; }
+  button.danger:hover { background: #3a1620; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .map-wrap { position: relative; flex: 1; min-width: 0; }
+  #map { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  .hint {
+    position: absolute; left: 12px; bottom: 12px; color: var(--muted);
+    background: rgba(14,17,23,.72); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; pointer-events: none;
+  }
+  aside {
+    width: 330px; flex: 0 0 330px; border-left: 1px solid var(--line);
+    background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+  }
+  .card { border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600;
+             text-transform: uppercase; letter-spacing: .6px; }
+  #iso { width: 100%; height: 190px; display: block; background: #0b0f14;
+         border: 1px solid var(--line); border-radius: 8px; }
+  .layers { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+  .layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .layers input { accent-color: var(--accent); }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .params { display: flex; flex-direction: column; gap: 7px; }
+  .param label { display: flex; justify-content: space-between; align-items: baseline;
+                 margin-bottom: 2px; font-size: 12px; color: #b9c4d4; }
+  .param label b { color: #fff; font-variant-numeric: tabular-nums; }
+  .param input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
+  .param-row { display: flex; align-items: center; gap: 8px; }
+  .params-head { display: flex; align-items: center; justify-content: space-between;
+                 margin-bottom: 8px; }
+  .params-note { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.4; }
+  .btn-mini { padding: 3px 9px; font-size: 12px; border-radius: 6px; }
+  #log { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow: auto;
+         font-variant-numeric: tabular-nums; }
+  #log li { padding: 3px 0; border-bottom: 1px dashed #1e2836; color: #c8d2e0; }
+  #log li time { color: var(--muted); margin-right: 8px; }
+  footer {
+    display: flex; gap: 16px; align-items: center; padding: 5px 14px;
+    border-top: 1px solid var(--line); color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  #link.bad { color: var(--bad); }
+  #link.good { color: var(--accent); }
+  .toast {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    background: #12352a; border: 1px solid var(--accent); color: #c9f7da;
+    border-radius: 8px; padding: 6px 14px; opacity: 0; transition: opacity .25s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">NeuPAN · 哨兵 <small>3D box planner / Gazebo</small></div>
+  <div class="btns">
+    <button id="btn-goal" title="点击地图设置目标 (G)">目标模式</button>
+    <button id="btn-follow" class="active" title="视角跟随机器人 (F)">跟随</button>
+    <button id="btn-fit" title="缩放到全场">全览</button>
+    <button id="btn-stop" class="danger" title="急停并清空目标 (S)">急停</button>
+  </div>
+  <div class="chips">
+    <div class="chip" id="chip-mode">状态 <b>--</b></div>
+    <div class="chip" id="chip-pose">位姿 <b>--</b></div>
+    <div class="chip" id="chip-vel">速度 <b>--</b></div>
+    <div class="chip" id="chip-mindist">最小间距 <b>--</b></div>
+    <div class="chip" id="chip-points">点 <b>--</b></div>
+  </div>
+</header>
+
+<main>
+  <section class="map-wrap">
+    <canvas id="map"></canvas>
+    <div class="toast" id="toast"></div>
+    <div class="hint">滚轮缩放 · 拖拽平移 · 目标模式左键设点 · 双击回中</div>
+  </section>
+  <aside>
+    <div class="card">
+      <h3>3D 视图（高度方向）</h3>
+      <canvas id="iso"></canvas>
+    </div>
+    <div class="card">
+      <div class="params-head">
+        <h3 style="margin:0">图层</h3>
+        <button class="btn-mini" id="btn-load-map" title="把刚才保存的地图交给全局 A* 使用（不用重启）">加载为全局图</button>
+        <button class="btn-mini" id="btn-save-map" title="把当前 SLAM 栅格地图存成 map_server 的 pgm/yaml">保存地图</button>
+      </div>
+      <div class="layers" id="layers">
+        <label><input type="checkbox" data-layer="cloud" checked><span class="swatch" style="background:var(--cloud)"></span>障碍点云</label>
+        <label><input type="checkbox" data-layer="dune" checked><span class="swatch" style="background:var(--dune)"></span>DUNE 点</label>
+        <label><input type="checkbox" data-layer="nrmp" checked><span class="swatch" style="background:var(--nrmp)"></span>NRMP 点</label>
+        <label><input type="checkbox" data-layer="initial" checked><span class="swatch" style="background:#8a93a6"></span>参考路径</label>
+        <label><input type="checkbox" data-layer="ref" checked><span class="swatch" style="background:var(--blue)"></span>参考状态</label>
+        <label><input type="checkbox" data-layer="plan" checked><span class="swatch" style="background:var(--bad)"></span>优化轨迹</label>
+        <label><input type="checkbox" data-layer="astar" checked><span class="swatch" style="background:var(--accent)"></span>A* 路径</label>
+        <label><input type="checkbox" data-layer="grid" checked><span class="swatch" style="background:#243041"></span>网格</label>
+        <label><input type="checkbox" data-layer="map" checked><span class="swatch" style="background:#6b7a91"></span>栅格地图</label>
+      </div>
+      <div class="params-note" id="map-info">地图：未加载（启动 web/map_builder.py 后会实时累积）</div>
+    </div>
+    <div class="card">
+      <div class="params-head">
+        <h3 style="margin:0">规划参数（实时）</h3>
+        <button class="btn-mini" id="btn-reset-params" title="恢复 planner.yaml 里的默认值">恢复默认</button>
+      </div>
+      <div class="params" id="params"></div>
+      <div class="params-note">拖动立即生效（只改运行中的参数，不写回 yaml）。q_s 变大更贴路径、eta 变大更保守。</div>
+    </div>
+    <div class="card" style="flex:1; display:flex; flex-direction:column; min-height:0;">
+      <h3>事件</h3>
+      <ul id="log"></ul>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span id="link" class="bad">● 未连接</span>
+  <span id="age">数据 --</span>
+  <span id="fps">-- fps</span>
+  <span id="cursor">x -- , y --</span>
+  <span id="goal">目标 --</span>
+  <span id="scale">--</span>
+  <span style="margin-left:auto">网页端：/neupan_status · /neupan_obstacles · /neupan_plan …</span>
+</footer>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const COLORS = {
+    bg: '#0e1117', gridMinor: '#18212c', gridMajor: '#243247', axis: '#2b3a4f',
+    cloud: '#ffb04a', dune: '#b06cff', nrmp: '#ff7a45', initial: '#8a93a6',
+    ref: '#3b82f6', plan: '#ef4444', astar: '#22c55e', robot: '#22c55e', goal: '#00e5a0'
+  };
+
+  const state = {
+    data: null,
+    view: { scale: 55, cx: 0, cy: 0 },   // scale = px per metre
+    follow: true,
+    goalMode: false,
+    layers: { cloud: true, dune: true, nrmp: true, initial: true, ref: true,
+              plan: true, astar: true, grid: true, map: true },
+    dragging: false,
+    moved: false,
+    last: null,
+    frames: 0,
+    fpsT: performance.now(),
+  };
+
+  // ------------------------------------------------------------------ canvas
+  const map = $('map');
+  const mctx = map.getContext('2d');
+  const iso = $('iso');
+  const ictx = iso.getContext('2d');
+
+  function resize(canvas, ctx) {
+    const dpr = window.devicePixelRatio || 1;
+    const r = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.round(r.width * dpr));
+    canvas.height = Math.max(1, Math.round(r.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w: r.width, h: r.height };
+  }
+  let mapSize = resize(map, mctx);
+  let isoSize = resize(iso, ictx);
+  window.addEventListener('resize', () => {
+    mapSize = resize(map, mctx);
+    isoSize = resize(iso, ictx);
+    draw();
+  });
+
+  function w2s(x, y) {
+    return [mapSize.w / 2 + (x - state.view.cx) * state.view.scale,
+            mapSize.h / 2 - (y - state.view.cy) * state.view.scale];
+  }
+  function s2w(px, py) {
+    return [state.view.cx + (px - mapSize.w / 2) / state.view.scale,
+            state.view.cy - (py - mapSize.h / 2) / state.view.scale];
+  }
+
+  // ------------------------------------------------------------------ drawing
+  function drawGrid() {
+    const { w, h } = mapSize;
+    const s = state.view.scale;
+    mctx.fillStyle = COLORS.bg;
+    mctx.fillRect(0, 0, w, h);
+    if (!state.layers.grid) return;
+    const [x0, y1] = s2w(0, 0);
+    const [x1, y0] = s2w(w, h);
+    const step = s > 40 ? 1 : s > 15 ? 2 : 5;
+    mctx.lineWidth = 1;
+    for (let x = Math.floor(x0 / step) * step; x <= x1; x += step) {
+      const [sx] = w2s(x, 0);
+      mctx.strokeStyle = (x % 5 === 0) ? COLORS.gridMajor : COLORS.gridMinor;
+      mctx.beginPath(); mctx.moveTo(sx, 0); mctx.lineTo(sx, h); mctx.stroke();
+    }
+    for (let y = Math.floor(y0 / step) * step; y <= y1; y += step) {
+      const [, sy] = w2s(0, y);
+      mctx.strokeStyle = (y % 5 === 0) ? COLORS.gridMajor : COLORS.gridMinor;
+      mctx.beginPath(); mctx.moveTo(0, sy); mctx.lineTo(w, sy); mctx.stroke();
+    }
+    // axes
+    mctx.strokeStyle = COLORS.axis; mctx.lineWidth = 1.5;
+    const [ax, ay] = w2s(0, 0);
+    mctx.beginPath(); mctx.moveTo(ax, 0); mctx.lineTo(ax, h); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(0, ay); mctx.lineTo(w, ay); mctx.stroke();
+    mctx.fillStyle = '#5b6b80'; mctx.font = '11px ui-monospace, monospace';
+    for (let x = Math.floor(x0 / 5) * 5; x <= x1; x += 5) {
+      const [sx] = w2s(x, 0);
+      if (sx > 24 && sx < w - 8) mctx.fillText(String(x), sx + 3, ay + 13);
+    }
+    for (let y = Math.floor(y0 / 5) * 5; y <= y1; y += 5) {
+      const [, sy] = w2s(0, y);
+      if (sy > 12 && sy < h - 8) mctx.fillText(String(y), ax + 5, sy - 4);
+    }
+  }
+
+  // ---------------------------------------------------------------- SLAM map
+  const mapLayer = { canvas: null, res: 0.05, w: 0, h: 0, origin: [0, 0], version: -1,
+                     loading: false };
+
+  function buildMapCanvas(j) {
+    const w = j.width, h = j.height;
+    const data = new Int8Array(w * h);
+    let idx = 0;
+    for (const run of j.runs) {
+      const [value, count] = run;
+      data.fill(value, idx, idx + count);
+      idx += count;
+    }
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w;          // image row 0 = largest y
+      for (let x = 0; x < w; x++) {
+        const v = data[src + x];
+        const px = (y * w + x) * 4;
+        if (v === 100) {
+          img.data[px] = 104; img.data[px + 1] = 120; img.data[px + 2] = 146;
+          img.data[px + 3] = 255;
+        } else if (v === 0) {
+          img.data[px] = 17; img.data[px + 1] = 23; img.data[px + 2] = 32;
+          img.data[px + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    mapLayer.canvas = cv;
+    mapLayer.res = j.resolution;
+    mapLayer.w = w; mapLayer.h = h;
+    mapLayer.origin = j.origin;
+    mapLayer.version = j.version;
+  }
+
+  async function loadMap() {
+    if (mapLayer.loading) return;
+    mapLayer.loading = true;
+    try {
+      const r = await fetch('/api/map');
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.version === mapLayer.version) return;
+      buildMapCanvas(j);
+      const info = $('map-info');
+      if (info) {
+        info.textContent = `地图：${j.width}×${j.height} 格 @ ${j.resolution.toFixed(2)} m`
+          + `（v${j.version}）`;
+      }
+    } catch (e) { /* keep the previous map */ } finally { mapLayer.loading = false; }
+  }
+
+  function drawMapLayer() {
+    if (!state.layers.map || !mapLayer.canvas) return;
+    const { w, h, res } = mapLayer;
+    const [sx, sy] = w2s(mapLayer.origin[0], mapLayer.origin[1] + h * res);
+    mctx.imageSmoothingEnabled = false;
+    mctx.drawImage(mapLayer.canvas, sx, sy, w * res * state.view.scale,
+                   h * res * state.view.scale);
+  }
+
+  function drawPath(points, color, width, dash) {
+    if (!points || points.length < 2) return;
+    mctx.save();
+    mctx.strokeStyle = color; mctx.lineWidth = width;
+    if (dash) mctx.setLineDash(dash);
+    mctx.beginPath();
+    points.forEach((p, i) => {
+      const [x, y] = w2s(p[0], p[1]);
+      i ? mctx.lineTo(x, y) : mctx.moveTo(x, y);
+    });
+    mctx.stroke();
+    mctx.restore();
+  }
+
+  // Points are drawn as one path per colour bucket: a single fill() for hundreds of
+  // markers instead of one fill() per marker (the old version was the main draw cost).
+  function bucketPath(points, radius) {
+    mctx.beginPath();
+    for (const p of points) {
+      const [x, y] = w2s(p[0], p[1]);
+      mctx.moveTo(x + radius, y);
+      mctx.arc(x, y, radius, 0, 6.2832);
+    }
+    mctx.fill();
+  }
+
+  function drawPoints(points, color, radius, heightColor) {
+    if (!points || !points.length) return;
+    if (!heightColor) {
+      mctx.fillStyle = color;
+      bucketPath(points, radius);
+      return;
+    }
+    const buckets = [[], [], [], [], []];
+    for (const p of points) {
+      const t = Math.max(0, Math.min(1, (p[2] || 0) / 1.2));
+      buckets[Math.min(4, Math.floor(t * 5))].push(p);
+    }
+    for (let i = 0; i < buckets.length; i++) {
+      if (!buckets[i].length) continue;
+      const t = i / 4;
+      mctx.fillStyle = `hsl(${32 - 20 * t}, 85%, ${58 + 12 * t}%)`;
+      bucketPath(buckets[i], radius);
+    }
+  }
+
+  function drawRobot() {
+    const st = state.data && state.data.status;
+    if (!st || !st.pose) return;
+    const [x, y, yaw] = st.pose;
+    const box = st.box || [0.6, 0.5, 0.5];
+    const [cx, cy] = w2s(x, y);
+    const s = state.view.scale;
+    mctx.save();
+    mctx.translate(cx, cy);
+    mctx.rotate(-yaw);
+    mctx.fillStyle = 'rgba(34,197,94,.22)';
+    mctx.strokeStyle = COLORS.robot; mctx.lineWidth = 2;
+    mctx.beginPath();
+    mctx.rect(-box[0] / 2 * s, -box[1] / 2 * s, box[0] * s, box[1] * s);
+    mctx.fill(); mctx.stroke();
+    // heading
+    mctx.beginPath(); mctx.moveTo(0, 0); mctx.lineTo(box[0] / 2 * s, 0);
+    mctx.strokeStyle = '#a7f3c4'; mctx.lineWidth = 2; mctx.stroke();
+    mctx.restore();
+    // velocity arrow (proportional to command)
+    if (st.cmd) {
+      const k = 34; // px per m/s
+      const [vx, vy] = st.cmd;
+      if (Math.hypot(vx, vy) > 0.05) {
+        mctx.strokeStyle = '#7dd3fc'; mctx.lineWidth = 2;
+        mctx.beginPath(); mctx.moveTo(cx, cy);
+        mctx.lineTo(cx + vx * k, cy - vy * k); mctx.stroke();
+        mctx.beginPath(); mctx.arc(cx + vx * k, cy - vy * k, 3, 0, 6.2832);
+        mctx.fillStyle = '#7dd3fc'; mctx.fill();
+      }
+    }
+  }
+
+  function drawGoal() {
+    const st = state.data && state.data.status;
+    if (!st || !st.goal) return;
+    const [x, y] = st.goal;
+    const [sx, sy] = w2s(x, y);
+    mctx.save();
+    mctx.strokeStyle = COLORS.goal; mctx.fillStyle = 'rgba(0,229,160,.18)';
+    mctx.lineWidth = 2;
+    mctx.beginPath(); mctx.arc(sx, sy, 10, 0, 6.2832); mctx.fill(); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(sx - 14, sy); mctx.lineTo(sx + 14, sy);
+    mctx.moveTo(sx, sy - 14); mctx.lineTo(sx, sy + 14); mctx.stroke();
+    mctx.restore();
+  }
+
+  let dirty = false;
+  let rafId = 0;
+  function scheduleDraw() {
+    dirty = true;
+    if (rafId) return;
+    // coalesce bursts of SSE frames into one paint per display refresh
+    rafId = requestAnimationFrame(() => { rafId = 0; if (dirty) { dirty = false; draw(); } });
+  }
+
+  function draw() {
+    if (!state.data) { mctx.fillStyle = COLORS.bg; mctx.fillRect(0, 0, mapSize.w, mapSize.h); }
+    drawGrid();
+    drawMapLayer();
+    const d = state.data || {};
+    if (state.layers.initial) drawPath(d.initial, COLORS.initial, 1.5, [6, 5]);
+    if (state.layers.astar) drawPath(d.astar, COLORS.astar, 2.5, []);
+    if (state.layers.ref) drawPath(d.ref, COLORS.ref, 2, []);
+    if (state.layers.plan) drawPath(d.plan, COLORS.plan, 2.5, []);
+    if (state.layers.cloud) drawPoints(d.cloud, COLORS.cloud, 1.8, true);
+    if (state.layers.dune) drawPoints(d.dune, COLORS.dune, 3.2, false);
+    if (state.layers.nrmp) drawPoints(d.nrmp, COLORS.nrmp, 2.4, false);
+    drawGoal();
+    drawRobot();
+    drawIso();
+  }
+
+  // ---------------------------------------------------------------- 3D view
+  function drawIso() {
+    const { w, h } = isoSize;
+    ictx.fillStyle = '#0b0f14';
+    ictx.fillRect(0, 0, w, h);
+    const d = state.data;
+    if (!d) return;
+    const C30 = Math.cos(Math.PI / 6), S30 = Math.sin(Math.PI / 6);
+    // keep the 3D view roughly in sync with the 2D viewer: same centre, same span
+    const span = Math.min(mapSize.w, mapSize.h) / state.view.scale;
+    const scale = Math.max(2.5, Math.min(w / (span * 1.9), h / (span * 1.25)));
+    const ox = w / 2, oy = h * 0.55;
+    const proj = (x, y, z) => [ox + (x - y) * C30 * scale,
+                               oy + ((x + y) * S30 - z * 1.35) * scale];
+
+    // ground grid
+    ictx.strokeStyle = '#1b2430'; ictx.lineWidth = 1;
+    const half = Math.max(4, Math.min(10, span / 2));
+    const stepG = half > 7 ? 2 : 1;
+    for (let i = -half; i <= half; i += stepG) {
+      const a = proj(i, -half, 0), b = proj(i, half, 0);
+      ictx.beginPath(); ictx.moveTo(a[0], a[1]); ictx.lineTo(b[0], b[1]); ictx.stroke();
+      const c = proj(-half, i, 0), e = proj(half, i, 0);
+      ictx.beginPath(); ictx.moveTo(c[0], c[1]); ictx.lineTo(e[0], e[1]); ictx.stroke();
+    }
+
+    // obstacle points coloured by height
+    if (state.layers.cloud && d.cloud) {
+      const buckets = [[], [], [], [], []];
+      for (const p of d.cloud) {
+        const t = Math.max(0, Math.min(1, (p[2] || 0) / 1.2));
+        buckets[Math.min(4, Math.floor(t * 5))].push(p);
+      }
+      for (let i = 0; i < buckets.length; i++) {
+        if (!buckets[i].length) continue;
+        const t = i / 4;
+        ictx.fillStyle = `hsla(${32 - 20 * t}, 85%, ${55 + 15 * t}%, .9)`;
+        for (const p of buckets[i]) {
+          const q = proj(p[0] - state.view.cx, p[1] - state.view.cy, p[2] || 0);
+          ictx.fillRect(q[0], q[1], 1.6, 1.6);
+        }
+      }
+    }
+
+    const st = d.status || {};
+    if (st.pose) {
+      const [x, y, yaw] = st.pose;
+      const box = st.box || [0.6, 0.5, 0.5];
+      const z0 = st.z_robot || box[2] / 2;
+      const rx = x - state.view.cx, ry = y - state.view.cy;
+      const corners = [];
+      for (const dz of [z0 - box[2] / 2, z0 + box[2] / 2]) {
+        for (const [dx, dy] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) {
+          const lx = dx * box[0] / 2, ly = dy * box[1] / 2;
+          const wx = rx + lx * Math.cos(yaw) - ly * Math.sin(yaw);
+          const wy = ry + lx * Math.sin(yaw) + ly * Math.cos(yaw);
+          corners.push(proj(wx, wy, dz));
+        }
+      }
+      ictx.strokeStyle = '#22c55e'; ictx.lineWidth = 1.4;
+      const order = [0, 1, 2, 3, 0];
+      ictx.beginPath();
+      order.forEach((i, k) => { k ? ictx.lineTo(corners[i][0], corners[i][1])
+                                   : ictx.moveTo(corners[i][0], corners[i][1]); });
+      ictx.stroke();
+      ictx.beginPath();
+      order.forEach((i, k) => { k ? ictx.lineTo(corners[i + 4][0], corners[i + 4][1])
+                                   : ictx.moveTo(corners[i + 4][0], corners[i + 4][1]); });
+      ictx.stroke();
+      for (let i = 0; i < 4; i++) {
+        ictx.beginPath(); ictx.moveTo(corners[i][0], corners[i][1]);
+        ictx.lineTo(corners[i + 4][0], corners[i + 4][1]); ictx.stroke();
+      }
+    }
+    if (st.goal) {
+      const q = proj(st.goal[0] - state.view.cx, st.goal[1] - state.view.cy, 0);
+      ictx.fillStyle = '#00e5a0';
+      ictx.beginPath(); ictx.arc(q[0], q[1], 4, 0, 6.2832); ictx.fill();
+    }
+    ictx.fillStyle = '#5b6b80';
+    ictx.font = '10px ui-monospace, monospace';
+    ictx.fillText('高度 ×1.35 夸张显示', 8, h - 8);
+  }
+
+  // ------------------------------------------------------------------ status
+  function setChips(st) {
+    const mode = st.mode || '--';
+    const el = $('chip-mode');
+    el.className = 'chip mode-' + mode.replace(/\s+/g, '-');
+    el.innerHTML = `状态 <b>${mode}</b>`;
+    $('chip-pose').innerHTML = st.pose
+      ? `位姿 <b>${st.pose[0].toFixed(2)}, ${st.pose[1].toFixed(2)}, ${st.pose[2].toFixed(2)}</b>`
+      : '位姿 <b>--</b>';
+    $('chip-vel').innerHTML = st.cmd
+      ? `速度 <b>${Math.hypot(st.cmd[0], st.cmd[1]).toFixed(2)} m/s</b>`
+      : '速度 <b>--</b>';
+    const md = st.min_dist;
+    $('chip-mindist').innerHTML = (md === undefined || md === null)
+      ? '最小间距 <b>--</b>'
+      : `最小间距 <b style="color:${md < 0.15 ? 'var(--bad)' : md < 0.4 ? 'var(--warn)' : 'var(--accent)'}">${md.toFixed(3)} m</b>`;
+    $('chip-points').innerHTML = st.points !== undefined
+      ? `点 <b>${st.points}</b> <span style="color:var(--muted)">/ DUNE ${st.dune_points || 0}</span>`
+      : '点 <b>--</b>';
+    $('goal').textContent = st.goal
+      ? `目标 ${st.goal[0].toFixed(2)}, ${st.goal[1].toFixed(2)}`
+      : '目标 --';
+  }
+
+  function logEvent(text) {
+    if (!text || (state.last && state.last.event === text)) return;
+    state.last = Object.assign({}, state.last || {}, { event: text });
+    const li = document.createElement('li');
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    li.innerHTML = `<time>${t}</time>${text}`;
+    const ul = $('log');
+    ul.prepend(li);
+    while (ul.children.length > 12) ul.removeChild(ul.lastChild);
+  }
+
+  // ------------------------------------------------------------------ SSE
+  // Browsers can silently drop a long-lived SSE stream (server restart, tab in the
+  // background). A watchdog reconnects when no frame arrived for a few seconds.
+  const WATCHDOG_MS = 4000;
+  let es = null;
+  let lastMsg = 0;
+  let reconnecting = false;
+
+  function connect() {
+    if (es) { try { es.close(); } catch (e) { /* ignore */ } }
+    es = new EventSource('/api/stream');
+    es.onopen = () => {
+      reconnecting = false;
+      $('link').className = 'good';
+      $('link').textContent = '● 已连接';
+    };
+    es.onerror = () => {
+      $('link').className = 'bad';
+      $('link').textContent = '● 断开，重连中';
+      if (!reconnecting) { reconnecting = true; setTimeout(connect, 1500); }
+    };
+    es.onmessage = (ev) => {
+      lastMsg = Date.now();
+      try { applyData(JSON.parse(ev.data)); } catch (e) { /* ignore malformed frame */ }
+    };
+  }
+  connect();
+  loadParams();
+  setInterval(loadParams, 15000);   // pick up defaults/spec changes
+  setInterval(() => {
+    if (!lastMsg) return;
+    const age = (Date.now() - lastMsg) / 1000;
+    const el = $('age');
+    if (el) el.textContent = `数据 ${age.toFixed(1)} s 前`;
+    if (age > WATCHDOG_MS / 1000) {
+      $('link').className = 'bad';
+      $('link').textContent = '● 数据超时，重连中';
+      connect();
+      lastMsg = Date.now();   // avoid a reconnect storm while it settles
+    }
+  }, 1000);
+
+  let firstFrame = true;
+  function applyData(d) {
+    state.data = d;
+    const st = d.status || {};
+    if (state.follow && st.pose) {
+      state.view.cx = st.pose[0];
+      state.view.cy = st.pose[1];
+    }
+    if (firstFrame) {
+      firstFrame = false;
+      if (st.pose) { state.view.cx = st.pose[0]; state.view.cy = st.pose[1]; }
+      const s = st.max_linear || 1.5;
+      state.view.scale = Math.max(28, Math.min(70, 60 / Math.max(0.8, s / 1.5)));
+    }
+    setChips(st);
+    logEvent(st.event);
+    syncParams(st);
+    if (d.map_version !== undefined && d.map_version !== mapLayer.version) loadMap();
+    scheduleDraw();
+    state.frames++;
+    const now = performance.now();
+    if (now - state.fpsT > 1000) {
+      $('fps').textContent = `${Math.round(state.frames * 1000 / (now - state.fpsT))} fps`;
+      state.frames = 0; state.fpsT = now;
+    }
+  }
+
+  // ------------------------------------------------------------- interactions
+  let dragStart = null;
+  map.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    state.dragging = true; state.moved = false;
+    dragStart = { x: e.offsetX, y: e.offsetY, cx: state.view.cx, cy: state.view.cy };
+  });
+  map.addEventListener('mousemove', (e) => {
+    const [wx, wy] = s2w(e.offsetX, e.offsetY);
+    $('cursor').textContent = `x ${wx.toFixed(2)} , y ${wy.toFixed(2)}`;
+    if (!state.dragging) return;
+    const dx = e.offsetX - dragStart.x, dy = e.offsetY - dragStart.y;
+    if (Math.hypot(dx, dy) > 3) state.moved = true;
+    if (state.moved) {
+      state.follow = false; $('btn-follow').classList.remove('active');
+      state.view.cx = dragStart.cx - dx / state.view.scale;
+      state.view.cy = dragStart.cy + dy / state.view.scale;
+      draw();
+    }
+  });
+  map.addEventListener('mouseup', (e) => {
+    const wasDrag = state.moved;
+    state.dragging = false;
+    if (wasDrag) return;
+    if (!state.goalMode || e.button !== 0) return;
+    const [x, y] = s2w(e.offsetX, e.offsetY);
+    sendGoal(x, y);
+  });
+  map.addEventListener('mouseleave', () => { state.dragging = false; });
+  map.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const before = s2w(e.offsetX, e.offsetY);
+    const factor = Math.exp(-e.deltaY * 0.0016);
+    state.view.scale = Math.max(6, Math.min(300, state.view.scale * factor));
+    if (!state.follow) {
+      const after = s2w(e.offsetX, e.offsetY);
+      state.view.cx += before[0] - after[0];
+      state.view.cy += before[1] - after[1];
+    }
+    draw();
+  }, { passive: false });
+  map.addEventListener('dblclick', () => {
+    state.follow = true; $('btn-follow').classList.add('active');
+  });
+
+  function toast(text, bad) {
+    const t = $('toast');
+    t.textContent = text;
+    t.style.borderColor = bad ? 'var(--bad)' : 'var(--accent)';
+    t.style.background = bad ? '#3a1620' : '#12352a';
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  async function sendGoal(x, y) {
+    try {
+      const r = await fetch('/api/goal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x: +x.toFixed(2), y: +y.toFixed(2) })
+      });
+      const j = await r.json();
+      if (j.ok) toast(`已发送目标 (${x.toFixed(2)}, ${y.toFixed(2)})`);
+      else toast(j.error || '发送失败', true);
+    } catch (err) { toast('网络错误', true); }
+  }
+
+  $('btn-goal').onclick = () => {
+    state.goalMode = !state.goalMode;
+    $('btn-goal').classList.toggle('active', state.goalMode);
+    map.style.cursor = state.goalMode ? 'crosshair' : 'grab';
+    toast(state.goalMode ? '目标模式：点击地图设点' : '目标模式已关闭');
+  };
+  $('btn-follow').onclick = () => {
+    state.follow = !state.follow;
+    $('btn-follow').classList.toggle('active', state.follow);
+  };
+  $('btn-fit').onclick = () => {
+    state.follow = false; $('btn-follow').classList.remove('active');
+    const d = state.data || {};
+    const pts = [...(d.cloud || []), ...(d.plan || []), ...(d.initial || [])];
+    if (d.status && d.status.pose) pts.push(d.status.pose);
+    if (d.status && d.status.goal) pts.push(d.status.goal);
+    if (!pts.length) return;
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs);
+    const y0 = Math.min(...ys), y1 = Math.max(...ys);
+    state.view.cx = (x0 + x1) / 2; state.view.cy = (y0 + y1) / 2;
+    const sx = mapSize.w / Math.max(2, (x1 - x0) * 1.15);
+    const sy = mapSize.h / Math.max(2, (y1 - y0) * 1.15);
+    state.view.scale = Math.max(6, Math.min(sx, sy));
+    draw();
+  };
+  $('btn-stop').onclick = async () => {
+    try {
+      await fetch('/api/stop', { method: 'POST' });
+      toast('已急停', false);
+    } catch (e) { toast('网络错误', true); }
+  };
+  document.querySelectorAll('#layers input').forEach((cb) => {
+    cb.onchange = () => { state.layers[cb.dataset.layer] = cb.checked; draw(); };
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const k = e.key.toLowerCase();
+    if (k === 'g') $('btn-goal').click();
+    else if (k === 'f') $('btn-follow').click();
+    else if (k === 's') $('btn-stop').click();
+  });
+
+  // --------------------------------------------------------------- parameters
+  const paramState = { specs: [], current: {}, defaults: {}, dragging: null,
+                       pending: {}, timer: 0 };
+
+  async function loadParams() {
+    try {
+      const r = await fetch('/api/params');
+      const j = await r.json();
+      paramState.specs = j.specs || [];
+      paramState.current = j.current || {};
+      paramState.defaults = j.defaults || {};
+      buildParamPanel();
+    } catch (e) { /* server not ready yet */ }
+  }
+
+  function paramRow(spec) {
+    const wrap = document.createElement('div');
+    wrap.className = 'param';
+    const value = paramState.current[spec.name];
+    if (spec.type === 'bool') {
+      wrap.innerHTML = `
+        <label title="${spec.hint || ''}" style="cursor:pointer">
+          <span>${spec.label}</span>
+          <input type="checkbox" id="pc-${spec.name}" style="accent-color:var(--accent)">
+        </label>`;
+      const box = wrap.querySelector('input');
+      box.checked = value === undefined ? true : !!value;
+      box.onchange = () => {
+        paramState.pending[spec.name] = box.checked;
+        clearTimeout(paramState.timer);
+        paramState.timer = setTimeout(flushParams, 120);
+      };
+      return wrap;
+    }
+    const shown = (value === undefined || value === null) ? '--' : Number(value).toFixed(2);
+    wrap.innerHTML = `
+      <label title="${spec.hint || ''}"><span>${spec.label}</span><b id="pv-${spec.name}">${shown}</b></label>
+      <input type="range" id="ps-${spec.name}" data-param="${spec.name}"
+             min="${spec.min}" max="${spec.max}" step="${spec.step}"
+             value="${value === undefined || value === null ? spec.min : value}">`;
+    const input = wrap.querySelector('input');
+    input.addEventListener('pointerdown', () => { paramState.dragging = spec.name; });
+    input.addEventListener('pointerup', () => { paramState.dragging = null; });
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      $('pv-' + spec.name).textContent = v.toFixed(2);
+      paramState.pending[spec.name] = v;
+      clearTimeout(paramState.timer);
+      paramState.timer = setTimeout(flushParams, 180);
+    });
+    return wrap;
+  }
+
+  function buildParamPanel() {
+    const host = $('params');
+    if (!host || host.dataset.built === '1') return;
+    host.dataset.built = '1';
+    const core = paramState.specs.filter(s => (s.group || 'core') === 'core');
+    const advanced = paramState.specs.filter(s => s.group === 'advanced');
+    for (const spec of core) host.appendChild(paramRow(spec));
+    if (advanced.length) {
+      const toggle = document.createElement('button');
+      toggle.className = 'btn-mini';
+      toggle.textContent = `高级参数（${advanced.length}）`;
+      toggle.style.marginTop = '4px';
+      const box = document.createElement('div');
+      box.className = 'params';
+      box.style.display = 'none';
+      box.style.marginTop = '6px';
+      for (const spec of advanced) box.appendChild(paramRow(spec));
+      toggle.onclick = () => {
+        const open = box.style.display !== 'none';
+        box.style.display = open ? 'none' : 'flex';
+        toggle.textContent = open ? `高级参数（${advanced.length}）`
+                                  : `收起高级参数（${advanced.length}）`;
+      };
+      host.appendChild(toggle);
+      host.appendChild(box);
+    }
+  }
+
+  async function flushParams() {
+    const payload = Object.assign({}, paramState.pending);
+    paramState.pending = {};
+    if (!Object.keys(payload).length) return;
+    try {
+      const r = await fetch('/api/params', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      if (!j.ok) toast(j.error || '参数未生效', true);
+    } catch (e) { toast('参数发送失败', true); }
+  }
+
+  function syncParams(st) {
+    const values = Object.assign({}, st.adjust || {}, st.live || {});
+    if (st.ref_speed !== undefined) values.ref_speed = st.ref_speed;
+    for (const spec of paramState.specs) {
+      const v = values[spec.name];
+      if (v === undefined || v === null) continue;
+      if (spec.type === 'bool') {
+        const box = $('pc-' + spec.name);
+        if (box) box.checked = !!v;
+        continue;
+      }
+      const label = $('pv-' + spec.name);
+      if (label) label.textContent = Number(v).toFixed(2);
+      const input = $('ps-' + spec.name);
+      // do not fight the user while a slider is being dragged
+      if (input && paramState.dragging !== spec.name) input.value = v;
+    }
+  }
+
+  const saveMapBtn = $('btn-save-map');
+  if (saveMapBtn) saveMapBtn.onclick = async () => {
+    try {
+      const r = await fetch('/api/map/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'rmul_2025_slam' }),
+      });
+      const j = await r.json();
+      toast(j.ok ? `已保存：${j.prefix}` : (j.error || '保存失败'), !j.ok);
+    } catch (e) { toast('保存失败', true); }
+  };
+
+  const loadMapBtn = $('btn-load-map');
+  if (loadMapBtn) loadMapBtn.onclick = async () => {
+    try {
+      const r = await fetch('/api/map/load', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'rmul_2025_slam.yaml' }),
+      });
+      const j = await r.json();
+      toast(j.ok ? `已加载全局地图：${j.path}` : (j.error || '加载失败'), !j.ok);
+    } catch (e) { toast('加载失败', true); }
+  };
+
+  const resetBtn = $('btn-reset-params');
+  if (resetBtn) resetBtn.onclick = async () => {
+    try {
+      await fetch('/api/params', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reset: true }) });
+      toast('已恢复默认参数');
+    } catch (e) { toast('恢复失败', true); }
+  };
+
+  // scale bar
+  setInterval(() => {
+    const px = state.view.scale;
+    const target = 120;
+    const metres = target / px;
+    const nice = Math.pow(10, Math.floor(Math.log10(metres)));
+    const m = nice * Math.round(metres / nice);
+    $('scale').textContent = `比例尺 ${m} m = ${Math.round(m * px)} px`;
+  }, 500);
+
+  draw();
+})();
+</script>
+</body>
+</html>

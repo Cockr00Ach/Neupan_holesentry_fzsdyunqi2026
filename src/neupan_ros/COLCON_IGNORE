@@ -1,0 +1,2 @@
+ROS 1 catkin package. It cannot be built in this ROS 2 Humble workspace;
+use the ROS 2 bridge in src/NeuPAN/example/fzsd2026 instead.

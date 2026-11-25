@@ -1,0 +1,12 @@
+SentryWeave Cooperative Sentry
+Copyright 2026 SentryWeave contributors
+Maintained by yelle233, 未来战队.
+Contact: 1376982098@qq.com
+
+The offline RL extension references Harkerbest/RMUC-OfflineRL,
+Copyright (c) 2026 Navigator Team, Beijing Normal-Hong Kong Baptist University.
+Its MIT reference license and fixed revision are recorded in
+integrations/rmuc_offlinerl/. Official RMUC data remains subject to DJI's terms.
+
+Third-party data, maps, trademarks and generated model artifacts are not
+covered by the project's source-code license. See THIRD_PARTY_NOTICES.md.
